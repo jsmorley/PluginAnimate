@@ -94,28 +94,40 @@ void Composite(Bytes& canvas, UINT width, const Bytes& pixels, const Rect& r)
                 d[c] = r.blend ? BYTE(s[c] + (unsigned(d[c]) * (255 - s[3]) + 127) / 255) : s[c];
         }
 }
-void SavePng(IWICImagingFactory* factory, const std::wstring& path, const Bytes& canvas, UINT w, UINT h,
-    const std::function<bool()>& cancelled)
+void SaveImage(IWICImagingFactory* factory, const std::wstring& path, const Bytes& canvas, UINT w, UINT h,
+    const std::function<bool()>& cancelled, bool bmp = false)
 {
     Cancel(cancelled);
     ComPtr<IWICStream> stream;
     Check(factory->CreateStream(&stream));
     Check(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE));
     ComPtr<IWICBitmapEncoder> encoder;
-    Check(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder));
+    Check(factory->CreateEncoder(bmp ? GUID_ContainerFormatBmp : GUID_ContainerFormatPng, nullptr, &encoder));
     Check(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache));
     ComPtr<IWICBitmapFrameEncode> frame;
-    Check(encoder->CreateNewFrame(&frame, nullptr));
-    Check(frame->Initialize(nullptr));
+    ComPtr<IPropertyBag2> properties;
+    Check(encoder->CreateNewFrame(&frame, &properties));
+    if (bmp)
+    {
+        // The V5 header carries explicit alpha masks; legacy BMP headers do not.
+        PROPBAG2 property{};
+        property.pstrName = const_cast<wchar_t*>(L"EnableV5Header32bppBGRA");
+        VARIANT value{};
+        value.vt = VT_BOOL;
+        value.boolVal = VARIANT_TRUE;
+        Check(properties->Write(1, &property, &value));
+    }
+    Check(frame->Initialize(properties.Get()));
     Check(frame->SetSize(w, h));
     WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
     Check(frame->SetPixelFormat(&format));
-    Require(IsEqualGUID(format, GUID_WICPixelFormat32bppBGRA), "PNG encoder does not support BGRA");
-    // PNG stores straight alpha; undo premultiplication used during compositing.
+    Require(IsEqualGUID(format, GUID_WICPixelFormat32bppBGRA), "Image encoder does not support BGRA");
+    // Both encoders store straight alpha; fully opaque pixels already match it.
     Bytes straight(canvas);
     for (size_t i = 0; i < straight.size(); i += 4)
     {
         if (!(i & 65535)) Cancel(cancelled);
+        if (straight[i + 3] == 255) continue;
         for (size_t c = 0; c < 3; ++c)
             straight[i + c] = straight[i + 3] ? BYTE((std::min)(255u, (unsigned(straight[i + c]) * 255 + straight[i + 3] / 2) / straight[i + 3])) : 0;
     }
@@ -133,9 +145,9 @@ void Save(IWICImagingFactory* factory, Animation& output, const Bytes& canvas, U
 {
     Require(output.frames.size() < MaxFrames && uint64_t(canvas.size()) * (output.frames.size() + 1) <= MaxOutputBytes,
         "Animation exceeds extraction limits (10000 frames / 1 GiB decoded pixels)");
-    std::wstring path = output.directory + L"\\frame-" + std::to_wstring(output.frames.size()) + L".png";
+    std::wstring path = output.directory + L"\\frame-" + std::to_wstring(output.frames.size()) + L".bmp";
     output.frames.push_back(path); // Track partial writes for cleanup too.
-    SavePng(factory, path, canvas, w, h, cancelled);
+    SaveImage(factory, path, canvas, w, h, cancelled, true);
 }
 struct TextMask
 {
@@ -208,7 +220,7 @@ void MakePreview(IWICImagingFactory* factory, Animation& output, const Bytes& ca
         }
     }
     output.preview = output.directory + L"\\loading.png";
-    SavePng(factory, output.preview, pixels, w, h, cancelled);
+    SaveImage(factory, output.preview, pixels, w, h, cancelled);
 }
 UINT Metadata(IWICMetadataQueryReader* reader, const wchar_t* name, UINT fallback = 0)
 {

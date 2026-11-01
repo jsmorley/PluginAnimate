@@ -66,4 +66,11 @@ for i, (width, x, disposal, pixels) in enumerate([(2, 0, 1, [1, 1]), (1, 0, 3, [
     gif += bytes([2, len(data)]) + data + b"\0"
 (root / "disposal.gif").write_bytes(gif + b"\x3b")
 (root / "no-delay.gif").write_bytes(gif[:25] + gif[33:] + b"\x3b")
+# Standalone SOURCE frame with transparent, partially transparent, and opaque pixels.
+alpha = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 4, 1, 8, 6, 0, 0, 0))
+alpha += chunk(b"acTL", struct.pack(">II", 1, 0))
+alpha += chunk(b"fcTL", struct.pack(">IIIIIHHBB", 0, 4, 1, 0, 0, 1, 10, 0, 0))
+alpha += chunk(b"IDAT", zlib.compress(b"\0" + b"".join(bytes((40, 80, 200, a)) for a in (0, 64, 128, 255))))
+alpha += chunk(b"IEND", b"")
+(root / "alpha.apng").write_bytes(alpha)
 print("Generated GIF/APNG fixtures")

@@ -31,6 +31,7 @@ $responses = @()
 $timeouts = 0
 $previewSeen = $false
 $candidate = $null
+$readyMilliseconds = $null
 function Send-RainmeterBang([string]$arguments) {
     $commandProcess = Start-Process -FilePath $rainmeterExecutable -ArgumentList $arguments -WindowStyle Hidden -PassThru
     if (-not $commandProcess.WaitForExit(5000)) { throw 'Rainmeter command did not finish promptly.' }
@@ -39,11 +40,11 @@ try {
     if (-not $wasActive) { Send-RainmeterBang '!ActivateConfig Animate Animate.ini' }
     Start-Sleep -Milliseconds 500
     Get-ChildItem -LiteralPath $tempRoot -Directory -Filter 'Rainmeter-Animate-*' | ForEach-Object { $before[$_.FullName] = $true }
+    $watch = [Diagnostics.Stopwatch]::StartNew()
     Send-RainmeterBang ('!SetOption MeasureAnimate ImageName "' + $animationPath + '" Animate')
     Send-RainmeterBang '!SetOption MeasureAnimate DisplayLoading 1 Animate'
     Send-RainmeterBang '!UpdateMeasure MeasureAnimate Animate'
     Send-RainmeterBang '!CommandMeasure MeasureAnimate Start Animate'
-    $watch = [Diagnostics.Stopwatch]::StartNew()
     while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
         [UIntPtr]$reply = [UIntPtr]::Zero
         $probe = [Diagnostics.Stopwatch]::StartNew()
@@ -56,12 +57,19 @@ try {
                 Where-Object { -not $before.ContainsKey($_.FullName) } | Select-Object -First 1 -ExpandProperty FullName
         }
         if ($candidate -and (Test-Path -LiteralPath (Join-Path $candidate 'loading.png'))) { $previewSeen = $true }
+        if ($null -eq $readyMilliseconds -and $candidate -and $ExpectedFrames -gt 0 -and
+            (Test-Path -LiteralPath (Join-Path $candidate "frame-$($ExpectedFrames - 1).bmp")) -and
+            -not (Test-Path -LiteralPath (Join-Path $candidate 'loading.png'))) {
+            $readyMilliseconds = $watch.Elapsed.TotalMilliseconds
+        }
         Start-Sleep -Milliseconds 100
     }
-    $frames = if ($candidate) { @(Get-ChildItem -LiteralPath $candidate -File -Filter 'frame-*.png').Count } else { 0 }
+    $frames = if ($candidate) { @(Get-ChildItem -LiteralPath $candidate -File -Filter 'frame-*.bmp').Count } else { 0 }
     $discarded = $candidate -and -not (Test-Path -LiteralPath (Join-Path $candidate 'loading.png'))
     $result = [PSCustomObject]@{
         File = [IO.Path]::GetFileName($animationPath)
+        FrameFormat = '32-bit BMP V5'
+        ReadyMilliseconds = $readyMilliseconds
         DurationSeconds = $watch.Elapsed.TotalSeconds
         SuccessfulUiResponses = $responses.Count
         UiTimeouts = $timeouts

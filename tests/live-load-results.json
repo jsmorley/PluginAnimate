@@ -1,10 +1,12 @@
 {
   "File": "A.gif",
-  "DurationSeconds": 20.0419553,
-  "SuccessfulUiResponses": 178,
+  "FrameFormat": "32-bit BMP V5",
+  "ReadyMilliseconds": 2260.2933,
+  "DurationSeconds": 20.041896,
+  "SuccessfulUiResponses": 171,
   "UiTimeouts": 0,
-  "MaximumUiResponseMilliseconds": 17.6302,
-  "AverageUiResponseMilliseconds": 2.266579213483146,
+  "MaximumUiResponseMilliseconds": 105.9055,
+  "AverageUiResponseMilliseconds": 5.226236842105263,
   "PreviewObserved": true,
   "FramesExtracted": 235,
   "PreviewDiscarded": true

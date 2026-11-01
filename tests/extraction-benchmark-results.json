@@ -1,0 +1,106 @@
+{
+  "Source": {
+    "File": "A.gif",
+    "Width": 715,
+    "Height": 584,
+    "Frames": 235
+  },
+  "Method": "Standalone WIC extraction, PNG/BMP/BMP/PNG followed by optimized alpha conversion runs; decoded PBGRA checksums cover all frames.",
+  "Samples": [
+    {
+      "format": "PNG",
+      "frames": 235,
+      "totalMs": 13083.4,
+      "saveMs": 12703,
+      "convertMs": 1223.36,
+      "writeMs": 10118.5,
+      "decodeMs": 111.813,
+      "compositeMs": 137.457,
+      "bytes": 171877056,
+      "pixelHash": "15267145658045381445"
+    },
+    {
+      "format": "BMP-V5",
+      "frames": 235,
+      "totalMs": 3612.91,
+      "saveMs": 3305.09,
+      "convertMs": 1229.32,
+      "writeMs": 1676.8,
+      "decodeMs": 114.685,
+      "compositeMs": 140.995,
+      "bytes": 392541650,
+      "pixelHash": "15267145658045381445"
+    },
+    {
+      "format": "BMP-V5",
+      "frames": 235,
+      "totalMs": 3720.03,
+      "saveMs": 3417.49,
+      "convertMs": 1221.02,
+      "writeMs": 1819.56,
+      "decodeMs": 111.574,
+      "compositeMs": 137.488,
+      "bytes": 392541650,
+      "pixelHash": "15267145658045381445"
+    },
+    {
+      "format": "PNG",
+      "frames": 235,
+      "totalMs": 11999.1,
+      "saveMs": 11699,
+      "convertMs": 1220.79,
+      "writeMs": 10094.3,
+      "decodeMs": 111.183,
+      "compositeMs": 136.341,
+      "bytes": 171877056,
+      "pixelHash": "15267145658045381445"
+    },
+    {
+      "format": "BMP-V5-fast-alpha",
+      "frames": 235,
+      "totalMs": 1862.13,
+      "saveMs": 1565.88,
+      "convertMs": 103.94,
+      "writeMs": 953.995,
+      "decodeMs": 108.267,
+      "compositeMs": 135.426,
+      "bytes": 392541650,
+      "pixelHash": "15267145658045381445"
+    },
+    {
+      "format": "PNG-fast-alpha",
+      "frames": 235,
+      "totalMs": 10745.1,
+      "saveMs": 10458.2,
+      "convertMs": 102.504,
+      "writeMs": 10070,
+      "decodeMs": 96.968,
+      "compositeMs": 135.579,
+      "bytes": 171877056,
+      "pixelHash": "15267145658045381445"
+    },
+    {
+      "format": "BMP-V5-fast-alpha",
+      "frames": 235,
+      "totalMs": 1613.25,
+      "saveMs": 1326.58,
+      "convertMs": 103.019,
+      "writeMs": 920.048,
+      "decodeMs": 99.4512,
+      "compositeMs": 135.903,
+      "bytes": 392541650,
+      "pixelHash": "15267145658045381445"
+    }
+  ],
+  "TransparencyValidation": {
+    "AlphaValues": [
+      0,
+      64,
+      128,
+      255
+    ],
+    "PngPixelHash": "11136231393488210788",
+    "BmpV5PixelHash": "11136231393488210788",
+    "Matches": true
+  }
+}

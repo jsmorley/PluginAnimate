@@ -8,6 +8,7 @@
 #include <iostream>
 #include <filesystem>
 #include <stdexcept>
+#include <fstream>
 #include <wincodec.h>
 #include <wrl/client.h>
 
@@ -59,12 +60,12 @@ std::vector<BYTE> ReadPixels(const std::wstring& path)
     ComPtr<IWICImagingFactory> factory;
     Assert(SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))), "WIC factory");
     ComPtr<IWICBitmapDecoder> decoder;
-    Assert(SUCCEEDED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder)), "Read extracted PNG");
+    Assert(SUCCEEDED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder)), "Read extracted image");
     ComPtr<IWICBitmapFrameDecode> frame;
     decoder->GetFrame(0, &frame);
     ComPtr<IWICFormatConverter> convert;
     factory->CreateFormatConverter(&convert);
-    Assert(SUCCEEDED(convert->Initialize(frame.Get(), GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom)), "Convert extracted PNG");
+    Assert(SUCCEEDED(convert->Initialize(frame.Get(), GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom)), "Convert extracted image");
     UINT w, h; frame->GetSize(&w, &h);
     std::vector<BYTE> pixels(size_t(w) * h * 4);
     Assert(SUCCEEDED(convert->CopyPixels(nullptr, w * 4, static_cast<UINT>(pixels.size()), pixels.data())), "Read pixels");
@@ -90,6 +91,7 @@ int wmain(int argc, wchar_t** argv)
                 ExtractAnimation(fixture(name), animation);
                 dir = animation.directory;
                 Assert(animation.frames.size() == 4, "Frame count / APNG poster exclusion");
+                Assert(std::filesystem::path(animation.frames[0]).extension() == L".bmp", "Animation frames use BMP files");
                 Assert(animation.delays == (std::wstring(name) == L"disposal.gif" ? std::vector<UINT>{100,250,10,330} : std::vector<UINT>{100,250,10,333}),
                     "GIF centiseconds / APNG fractions and minimum delay");
                 Assert(ReadPixels(animation.frames[0]) == std::vector<BYTE>({0,0,255,255,0,0,255,255}), "Initial canvas");
@@ -110,6 +112,23 @@ int wmain(int argc, wchar_t** argv)
             ExtractAnimation(fixture(L"no-delay.gif"), missing);
             Assert(zero.delays[0] == 80, "APNG denominator zero means 100");
             Assert(missing.delays[0] == 100, "Missing GIF delay defaults to 100 ms");
+        }
+        {
+            Animation alpha;
+            ExtractAnimation(fixture(L"alpha.apng"), alpha);
+            const auto pixels = ReadPixels(alpha.frames[0]);
+            Assert(pixels[3] == 0 && pixels[7] == 64 && pixels[11] == 128 && pixels[15] == 255,
+                "BMP V5 preserves transparent, partially transparent, and opaque alpha values");
+            Assert(pixels[12] == 200 && pixels[13] == 80 && pixels[14] == 40, "Opaque colors stay unchanged");
+            Assert(pixels[4] >= 198 && pixels[4] <= 202 && pixels[8] >= 198 && pixels[8] <= 202,
+                "Partial-alpha colors survive premultiplication round trips");
+            std::ifstream input(alpha.frames[0], std::ios::binary);
+            BYTE header[70]{};
+            input.read(reinterpret_cast<char*>(header), sizeof(header));
+            auto little32 = [&](size_t pos) { return UINT(header[pos]) | UINT(header[pos + 1]) << 8 |
+                UINT(header[pos + 2]) << 16 | UINT(header[pos + 3]) << 24; };
+            Assert(input && header[0] == 'B' && header[1] == 'M' && little32(14) == 124 && header[28] == 32 &&
+                little32(66) == 0xff000000, "Frames have a 32-bit BMP V5 header and explicit alpha mask");
         }
         std::wstring badDir;
         {
@@ -147,7 +166,7 @@ int wmain(int argc, wchar_t** argv)
                 catch (const AnimationCancelled&) { cancelled = true; }
                 cancelledDir = partial.directory;
             }
-            Assert(cancelled && !std::filesystem::exists(cancelledDir), "Cancelled extraction removes partial PNG output");
+            Assert(cancelled && !std::filesystem::exists(cancelledDir), "Cancelled extraction removes partial frame output");
         }
 
         options = {{L"ImageName",fixture(L"blend.apng")},{L"MeterName",L"Image"},{L"Speed",L"20"},{L"Loop",L"0"}};
@@ -250,7 +269,7 @@ int wmain(int argc, wchar_t** argv)
         while (m->index != 3 && GetTickCount64() < blockedDeadline) Sleep(5);
         Assert(m->index == 3 && commands.size() == beforeBlockedUi, "Worker progresses independently while UI is blocked");
         Pump(5);
-        Assert(commands.size() > beforeBlockedUi && commands.back().find(L"frame-3.png") != std::wstring::npos,
+        Assert(commands.size() > beforeBlockedUi && commands.back().find(L"frame-3.bmp") != std::wstring::npos,
             "UI receives latest frame without replaying a backlog");
         ExecuteBang(data, L"end");
         options[L"Speed"] = L"20";
@@ -332,7 +351,7 @@ int wmain(int argc, wchar_t** argv)
                     const auto request = m->loadRevision;
                     options[L"DisplayLoading"] = L"0";
                     Reload(data, &options, &maximum);
-                    Assert(m->loadRevision == request && m->loading && commands.back().find(L"frame-0.png") != std::wstring::npos,
+                    Assert(m->loadRevision == request && m->loading && commands.back().find(L"frame-0.bmp") != std::wstring::npos,
                         "DisplayLoading=0 switches to the plain first frame without restarting extraction");
                     options[L"DisplayLoading"] = L"1";
                     Reload(data, &options, &maximum);

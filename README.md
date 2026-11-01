@@ -1,7 +1,7 @@
 # Animate.dll
 
 Native C++ Rainmeter plugin for animated GIF and APNG files. Frames are decoded
-once into PNGs; a normal `Meter=Image` displays them. No external codec, command
+once into 32-bit BMP V5 files with alpha; a normal `Meter=Image` displays them. No external codec, command
 line program, or C++ runtime installation is required.
 
 ```ini
@@ -122,9 +122,9 @@ variable. Finalization wakes and joins this playback worker promptly.
 Extraction and temporary-file deletion run on a separate background worker at
 below-normal thread priority. `Reload` queues a source request and returns
 without reading or decoding the animation. The extraction worker never holds
-the playback/UI mutex while decoding or writing PNGs. Changing sources cancels
+the playback/UI mutex while decoding or writing frames. Changing sources cancels
 the old request; stale results and errors are discarded. Codec operations,
-frame processing, PNG writing, and APNG parsing have cancellation checkpoints.
+frame processing, image writing, and APNG parsing have cancellation checkpoints.
 GIF frame metadata is read on demand, and oversized animations are rejected
 before writing their frame files.
 
@@ -136,27 +136,30 @@ completed extraction or error back to Rainmeter; all Rainmeter API calls remain
 on the UI thread. Each measure has at most one extraction in progress.
 
 The worker posts a message to the UI thread to send `!SetOption "MeterName"
-ImageName "frame.png"`, `!UpdateMeter`, and `!Redraw`. All Rainmeter API calls
+ImageName "frame.bmp"`, `!UpdateMeter`, and `!Redraw`. All Rainmeter API calls
 stay on its UI thread. If a skin update blocks the UI, playback timing continues
 on the worker; at most one display message is queued, and the Image meter shows
 the latest frame when the UI is available. Rendering itself must wait for the
 UI thread, so frames may be skipped visually during a long skin update.
-Images are decoded once in the background, and Rainmeter loads the extracted PNGs
+Images are decoded once in the background, and Rainmeter loads the extracted BMP files
 for display. Large images or very short intervals can increase display work.
 
 Every measure has a unique `%TEMP%\Rainmeter-Animate-{GUID}` folder, where
 `%TEMP%` is the Windows temporary directory returned by `GetTempPathW` and
 `{GUID}` is a newly generated identifier. Extracted frames are named
-`frame-0.png`, `frame-1.png`, `frame-2.png`, and so on. For example:
+`frame-0.bmp`, `frame-1.bmp`, `frame-2.bmp`, and so on. For example:
 
 ```text
-%TEMP%\Rainmeter-Animate-{GUID}\frame-0.png
+%TEMP%\Rainmeter-Animate-{GUID}\frame-0.bmp
 ```
 
 `loading.png` is the separate annotated first-frame preview in that same
 directory. It is discarded as soon as the full animation is ready.
 
-These are full-canvas PNG frames, including those extracted from APNG sources.
+These are full-canvas, uncompressed 32-bit BMP V5 frames, including those
+extracted from APNG sources. The V5 header includes an explicit alpha mask,
+preserving transparency. Windows 8 or later is required for WIC BMP V5 alpha
+support. The single annotated loading preview remains a PNG.
 Each plugin measure owns a separate folder, even when measures use the same
 source. Changing the source deletes its old frames. Closing, unloading, or refreshing the skin calls
 `Finalize`, which stops playback, cancels extraction, and schedules deletion of
@@ -167,23 +170,48 @@ Failed extractions also clean up their partial output. Only files created by
 this instance are deleted; cleanup does not recursively traverse directories.
 
 Large-file regression check (November 1, 2026): a 715 × 584 pixel `A.gif` with
-235 frames produced its annotated preview in roughly **140–215 ms** in the
-native x64/x32 test harness. Extraction continued in the
-background. A separate **20-second test in running Rainmeter** observed the
+235 frames loaded in about **2.5–2.8 seconds**, with its annotated preview
+appearing in about **90–110 ms**, in concurrent native x64/x32 regression tests.
+Extraction continued in the
+background. A separate **20-second BMP test in running Rainmeter** loaded the
+animation in about **2.3 seconds** and observed the
 preview, all 235 extracted frames, and deletion of the preview after loading.
-Rainmeter answered **178 UI responsiveness probes with no timeouts**; the
-slowest response was **17.63 ms**. Other skins remained running. These are
+Rainmeter answered **171 UI responsiveness probes with no timeouts**; the
+slowest response was **105.91 ms**. Other skins remained running. These are
 observations on the development machine, not timing guarantees. Raw live-test
 results are in [tests/live-load-results.json](tests/live-load-results.json).
 
-GIF transparency, offsets, and disposal are composited into full-canvas PNGs.
+GIF transparency, offsets, and disposal are composited into full-canvas BMPs.
 APNG additionally supports SOURCE/OVER blending, BACKGROUND/PREVIOUS disposal,
 and an excluded default poster image. Limits: 256 MiB input, 16 megapixels per
 canvas, 10,000 frames, and 1 GiB of cumulative decoded frame pixels. Decoder
 errors appear in Rainmeter's log. Meter names and temporary paths containing
 quotes, square brackets, or newlines cannot be used in generated bangs.
 
+## Extraction performance
+
+Version 1.2.0 uses uncompressed BMP V5 frames and skips unnecessary alpha
+conversion for fully opaque pixels. A standalone comparison using the same
+235-frame `A.gif` measured:
+
+| Frame output | Extraction time | Temporary frame files |
+| --- | ---: | ---: |
+| Previous PNG implementation | 12.0–13.1 seconds | 164 MiB |
+| BMP V5 with optimized alpha conversion | 1.6–1.9 seconds | 374 MiB |
+
+This trades temporary disk space for lower encoding CPU use and faster startup.
+Decoded pixel checksums matched for every frame. A separate alpha fixture
+verified transparency values of 0, 64, 128, and 255. The background-worker
+regression tests, run concurrently for both architectures, took about
+2.5–2.8 seconds including the preview. Timing depends on system load and storage.
+Raw samples are in [tests/extraction-benchmark-results.json](tests/extraction-benchmark-results.json).
+`tests/PrepareExtractionBench.py` generates the standalone profiling harness in
+the ignored `tests/x64/Bench` directory without changing production source.
+
 ## Measured CPU use
+
+These CPU results were recorded with the earlier PNG-frame implementation.
+They have not been remeasured with BMP frames.
 
 Measured on October 31, 2026 using 64-bit Rainmeter and the installed Animate
 example: one 125 × 125 pixel, eight-frame GIF, `Speed=0` (embedded timing), and
