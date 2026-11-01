@@ -49,16 +49,16 @@ no decimal places; `[MeasureAnimate]` displays the source path.
 Commands (case insensitive):
 
 ```ini
-LeftMouseUpAction=[!CommandMeasure MeasureAnimate "start"]
-LeftMouseUpAction=[!CommandMeasure MeasureAnimate "pause"]
-LeftMouseUpAction=[!CommandMeasure MeasureAnimate "end"]
+LeftMouseUpAction=[!CommandMeasure MeasureAnimate "Start"]
+LeftMouseUpAction=[!CommandMeasure MeasureAnimate "Pause"]
+LeftMouseUpAction=[!CommandMeasure MeasureAnimate "End"]
 ```
 
-`start` begins playback, resumes a paused animation at its current frame, or
+`Start` begins playback, resumes a paused animation at its current frame, or
 restarts a completed animation. Repeated `start` while playing has no effect.
-`pause` retains the displayed frame and repeat count; resuming waits one full
+`Pause` retains the displayed frame and repeat count; resuming waits one full
 duration for that frame before advancing, using its embedded delay when Speed=0.
-`end` stops playback, resets the repeat count,
+`End` stops playback, resets the repeat count,
 and displays frame 0. Natural completion leaves the last frame displayed.
 Loading a source initially displays frame 0, but does not start a timer.
 
