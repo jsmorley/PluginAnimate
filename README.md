@@ -113,8 +113,18 @@ UI thread, so frames may be skipped visually during a long skin update.
 Images are decoded once during reload, and Rainmeter loads the extracted PNGs
 for display. Large images or very short intervals can increase display work.
 
-Every measure has a unique `%TEMP%\Rainmeter-Animate-{GUID}` folder. Changing the
-source deletes its old frames. Closing, unloading, or refreshing the skin calls
+Every measure has a unique `%TEMP%\Rainmeter-Animate-{GUID}` folder, where
+`%TEMP%` is the Windows temporary directory returned by `GetTempPathW` and
+`{GUID}` is a newly generated identifier. Extracted frames are named
+`frame-0.png`, `frame-1.png`, `frame-2.png`, and so on. For example:
+
+```text
+%TEMP%\Rainmeter-Animate-{GUID}\frame-0.png
+```
+
+These are full-canvas PNG frames, including those extracted from APNG sources.
+Each plugin measure owns a separate folder, even when measures use the same
+source. Changing the source deletes its old frames. Closing, unloading, or refreshing the skin calls
 `Finalize`, which stops the worker and deletes its extracted frames and folder.
 Failed extractions also clean up their partial output. Only files created by
 this instance are deleted; cleanup does not recursively traverse directories.
@@ -149,6 +159,9 @@ matching architecture to `%APPDATA%\Rainmeter\Plugins\Animate.dll`.
 Copy the entire `examples\Animate` directory into your Rainmeter skins folder,
 then refresh Rainmeter's skin list and load `Animate\Animate.ini`.
 `Example.ini` is also provided at the repository root as a convenient copy.
+The Image meter spans the background's width and fits the selected animation
+into a 125-pixel-high area above the controls. `PreserveAspectRatio=1` centers
+the image in that area while preserving its proportions for any chosen source.
 
 The example starts with `@Resources\Loading.gif`. To try the included APNG, set
 `AnimationFile=#@#BeachBall.apng` under `[Variables]` and refresh the skin.
