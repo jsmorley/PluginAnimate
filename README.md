@@ -4,11 +4,6 @@ Native C++ Rainmeter plugin for animated GIF and APNG files. Frames are decoded
 once into PNGs; a normal `Meter=Image` displays them. No external codec, command
 line program, or C++ runtime installation is required.
 
-Prebuilt DLLs are in [Releases/x64/Animate.dll](Releases/x64/Animate.dll) and
-[Releases/x32/Animate.dll](Releases/x32/Animate.dll). Use the architecture of
-your Rainmeter installation. A complete example skin, with GIF and APNG sample
-files, is in [examples/Animate](examples/Animate). The skin uses `@Inherit`.
-
 ```ini
 [MeasureAnimate]
 Measure=Plugin
