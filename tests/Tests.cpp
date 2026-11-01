@@ -142,8 +142,14 @@ int wmain(int argc, wchar_t** argv)
         Pump(60);
         Assert(!m->playing && m->index == paused && commands.size() == sent, "Pause suspends worker");
         Assert(Update(data) == 20, "Numeric value retains paused frame duration");
+        ExecuteBang(data, L"PaUsE");
+        Assert(m->playing && m->index == paused, "Pause toggles resume without resetting frame");
+        ExecuteBang(data, L"pause");
         ExecuteBang(data, L"start");
-        Assert(m->index == paused, "Start resumes paused frame");
+        Assert(m->playing && m->index == 0 && m->repeats == 0, "Start restarts a paused animation");
+        Until([&] { return m->index > 0; }, "Restarted playback advances");
+        ExecuteBang(data, L"start");
+        Assert(m->playing && m->index == 0 && m->repeats == 0, "Start restarts an already playing animation");
         Until([&] { return m->completed.load(); }, "One play-through completes");
         Assert(!m->playing && m->completed && m->index == 3, "Loop=0 stops on last frame");
         Assert(Update(data) == 20, "Completed playback reports effective speed");
@@ -152,6 +158,27 @@ int wmain(int argc, wchar_t** argv)
         ExecuteBang(data, L"end");
         Assert(!m->playing && m->index == 0 && m->repeats == 0, "End stops and resets");
         Assert(Update(data) == 20, "End retains fixed speed value");
+        ExecuteBang(data, L"pause");
+        Assert(!m->playing && !m->paused, "Pause does not start an ended animation");
+        options[L"Speed"] = L"30000";
+        Reload(data, &options, &maximum);
+        ExecuteBang(data, L"start");
+        Sleep(30); // Let the worker enter its 30-second interruptible wait.
+        const auto endStarted = GetTickCount64();
+        ExecuteBang(data, L"end");
+        Assert(GetTickCount64() - endStarted < 500, "End immediately interrupts a long frame wait");
+        Assert(!m->playing && !m->paused && m->index == 0 && m->repeats == 0, "End clears every playback state");
+        options[L"Speed"] = L"20";
+        Reload(data, &options, &maximum);
+        ExecuteBang(data, L"start");
+        const auto queuedDeadline = GetTickCount64() + 3000;
+        while (m->index == 0 && GetTickCount64() < queuedDeadline) Sleep(5);
+        Assert(m->index > 0, "Worker has queued an undispatched frame");
+        ExecuteBang(data, L"end");
+        const auto afterEndCommands = commands.size();
+        Pump(60);
+        Assert(!m->playing && m->index == 0 && commands.size() == afterEndCommands,
+            "End invalidates pending display updates and cannot advance afterward");
         options.erase(L"Speed");
         Reload(data, &options, &maximum);
         Assert(m->speed == 0, "Omitted Speed defaults to embedded timing");
@@ -165,7 +192,7 @@ int wmain(int argc, wchar_t** argv)
         Assert(m->interval == 250, "Automatic playback schedules next frame's distinct duration");
         ExecuteBang(data, L"pause");
         Assert(Update(data) == 250, "Automatic value reports paused frame's embedded duration");
-        ExecuteBang(data, L"start");
+        ExecuteBang(data, L"pause");
         Assert(m->index == 1 && m->interval == 250, "Automatic pause/resume retains frame and duration");
         options[L"Speed"] = L"30";
         Reload(data, &options, &maximum);
@@ -197,6 +224,11 @@ int wmain(int argc, wchar_t** argv)
         ExecuteBang(data, L"start");
         Until([&] { return m->repeats >= 1; }, "Endless playback repeats");
         Assert(m->playing && m->repeats >= 1, "Endless loop");
+        ExecuteBang(data, L"pause");
+        const auto heldRepeats = m->repeats.load();
+        const auto heldFrame = m->index.load();
+        ExecuteBang(data, L"pause");
+        Assert(m->playing && m->repeats == heldRepeats && m->index == heldFrame, "Pause toggle preserves completed repeats");
         options[L"ImageName"] = fixture(L"disposal.gif");
         options[L"Speed"] = L"50";
         options[L"MeterName"] = L"OtherImage";

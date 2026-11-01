@@ -54,12 +54,17 @@ LeftMouseUpAction=[!CommandMeasure MeasureAnimate "Pause"]
 LeftMouseUpAction=[!CommandMeasure MeasureAnimate "End"]
 ```
 
-`Start` begins playback, resumes a paused animation at its current frame, or
-restarts a completed animation. Repeated `start` while playing has no effect.
-`Pause` retains the displayed frame and repeat count; resuming waits one full
+`Start` always starts over at frame 0 and resets the repeat count, even when
+the animation is already playing or paused.
+`Pause` toggles between pausing and resuming. It retains the displayed frame
+and repeat count; resuming waits one full
 duration for that frame before advancing, using its embedded delay when Speed=0.
-`End` stops playback, resets the repeat count,
-and displays frame 0. Natural completion leaves the last frame displayed.
+`Pause` has no effect before playback starts, after `End`, or after natural
+completion; use `Start` to start over in those states.
+`End` immediately interrupts playing or paused playback, cancels any pending
+frame update, resets the repeat count, and displays frame 0. It wakes the worker
+without waiting for the current frame delay, even with a long Speed interval.
+Natural completion leaves the last frame displayed.
 Loading a source initially displays frame 0, but does not start a timer.
 
 ## Embedded frame timing (`Speed=0`)

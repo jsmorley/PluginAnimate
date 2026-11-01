@@ -28,7 +28,9 @@ function Read-Counters {
 try {
     # Paused / playing / playing / paused brackets playback with a baseline.
     foreach ($state in @('pause', 'start', 'start', 'pause')) {
-        & $rainmeterExecutable '!CommandMeasure' 'MeasureAnimate' $state 'Animate'
+        # Start always restarts; Pause toggles, so establish each sample state explicitly.
+        & $rainmeterExecutable '!CommandMeasure' 'MeasureAnimate' 'start' 'Animate'
+        if ($state -eq 'pause') { & $rainmeterExecutable '!CommandMeasure' 'MeasureAnimate' 'pause' 'Animate' }
         Start-Sleep -Seconds 2
         $begin = Read-Counters
         Write-Output "Sampling $state for $SampleSeconds seconds..."

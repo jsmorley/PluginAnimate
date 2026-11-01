@@ -35,6 +35,7 @@ struct Measure
     std::thread worker;
     bool shutdown = false;
     bool pending = false;
+    bool paused = false;
     std::wstring source, meter;
     std::unique_ptr<Animation> animation;
 
@@ -242,16 +243,30 @@ PLUGIN_EXPORT void ExecuteBang(void* data, LPCWSTR args)
     std::unique_lock<std::mutex> lock(m.mutex);
     if (_wcsicmp(args, L"start") == 0)
     {
-        if (!m.worker.joinable() || !m.animation || m.meter.empty() || m.playing) return;
-        if (m.completed) { m.index = 0; m.repeats = 0; m.completed = false; }
+        if (!m.worker.joinable() || !m.animation || m.meter.empty()) return;
+        m.index = 0; m.repeats = 0; m.completed = false; m.paused = false;
         m.StartPlayback();
         lock.unlock();
         m.Show();
     }
-    else if (_wcsicmp(args, L"pause") == 0) m.StopPlayback();
+    else if (_wcsicmp(args, L"pause") == 0)
+    {
+        if (m.playing)
+        {
+            m.StopPlayback();
+            m.paused = true;
+        }
+        else if (m.paused && m.worker.joinable() && m.animation && !m.meter.empty())
+        {
+            m.paused = false;
+            m.StartPlayback();
+            lock.unlock();
+            m.Show();
+        }
+    }
     else if (_wcsicmp(args, L"end") == 0)
     {
-        m.StopPlayback(); m.index = 0; m.repeats = 0; m.completed = false;
+        m.StopPlayback(); m.index = 0; m.repeats = 0; m.completed = false; m.paused = false;
         lock.unlock();
         m.Show();
     }
