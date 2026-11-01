@@ -53,15 +53,17 @@ Commands (case insensitive):
 ```ini
 LeftMouseUpAction=[!CommandMeasure MeasureAnimate "Start"]
 LeftMouseUpAction=[!CommandMeasure MeasureAnimate "Pause"]
+LeftMouseUpAction=[!CommandMeasure MeasureAnimate "PauseResume"]
 LeftMouseUpAction=[!CommandMeasure MeasureAnimate "End"]
 ```
 
 `Start` always starts over at frame 0 and resets the repeat count, even when
 the animation is already playing or paused.
-`Pause` toggles between pausing and resuming. It retains the displayed frame
+`Pause` only pauses; repeating it never resumes playback.
+`PauseResume` toggles between pausing and resuming. It retains the displayed frame
 and repeat count; resuming waits one full
 duration for that frame before advancing, using its embedded delay when Speed=0.
-`Pause` has no effect before playback starts, after `End`, or after natural
+`Pause` and `PauseResume` have no effect before playback starts, after `End`, or after natural
 completion; use `Start` to start over in those states.
 `End` immediately interrupts playing or paused playback, cancels any pending
 frame update, resets the repeat count, and displays frame 0. It wakes the worker
@@ -78,8 +80,8 @@ avoiding a flicker of Loading... on small animations. The option can be changed
 dynamically without restarting extraction. The actual animation frames remain
 unmodified. When extraction completes, playback uses those frames and the
 annotated preview is deleted in the background. `Start` received while loading remembers the request and starts
-playback when the frames are ready. `Pause` toggles that pending playback
-request, and `End` cancels it; extraction may continue in the background so
+playback when the frames are ready. `Pause` pauses that pending playback request;
+`PauseResume` toggles it, and `End` cancels it. Extraction may continue in the background so
 the frames remain available for a later `Start`.
 
 ## Embedded frame timing (`Speed=0`)

@@ -284,19 +284,20 @@ PLUGIN_EXPORT void ExecuteBang(void* data, LPCWSTR args)
         lock.unlock();
         m.Show();
     }
-    else if (_wcsicmp(args, L"pause") == 0)
+    else if (_wcsicmp(args, L"pause") == 0 || _wcsicmp(args, L"pauseresume") == 0)
     {
+        const bool toggle = _wcsicmp(args, L"pauseresume") == 0;
         if (m.loading)
         {
             if (m.startWhenReady) { m.startWhenReady = false; m.paused = true; }
-            else if (m.paused) { m.startWhenReady = true; m.paused = false; }
+            else if (toggle && m.paused) { m.startWhenReady = true; m.paused = false; }
         }
         else if (m.playing)
         {
             m.StopPlayback();
             m.paused = true;
         }
-        else if (m.paused && m.worker.joinable() && m.animation && !m.meter.empty())
+        else if (toggle && m.paused && m.worker.joinable() && m.animation && !m.meter.empty())
         {
             m.paused = false;
             m.StartPlayback();
@@ -311,7 +312,7 @@ PLUGIN_EXPORT void ExecuteBang(void* data, LPCWSTR args)
         lock.unlock();
         m.Show();
     }
-    else RmLog(m.rm, LOG_WARNING, L"Animate: Unknown command. Use start, pause, or end.");
+    else RmLog(m.rm, LOG_WARNING, L"Animate: Unknown command. Use start, pause, pauseresume, or end.");
 }
 
 PLUGIN_EXPORT void Finalize(void* data)

@@ -28,7 +28,7 @@ function Read-Counters {
 try {
     # Paused / playing / playing / paused brackets playback with a baseline.
     foreach ($state in @('pause', 'start', 'start', 'pause')) {
-        # Start always restarts; Pause toggles, so establish each sample state explicitly.
+        # Start restarts and Pause is pause-only; establish each sample state explicitly.
         & $rainmeterExecutable '!CommandMeasure' 'MeasureAnimate' 'start' 'Animate'
         if ($state -eq 'pause') { & $rainmeterExecutable '!CommandMeasure' 'MeasureAnimate' 'pause' 'Animate' }
         Start-Sleep -Seconds 2

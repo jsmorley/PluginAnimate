@@ -202,7 +202,11 @@ int wmain(int argc, wchar_t** argv)
         Assert(!m->playing && m->index == paused && commands.size() == sent, "Pause suspends worker");
         Assert(Update(data) == 20, "Numeric value retains paused frame duration");
         ExecuteBang(data, L"PaUsE");
-        Assert(m->playing && m->index == paused, "Pause toggles resume without resetting frame");
+        Pump(40);
+        Assert(!m->playing && m->paused && m->index == paused && commands.size() == sent,
+            "Repeated Pause is idempotent and does not resume or advance");
+        ExecuteBang(data, L"PaUsErEsUmE");
+        Assert(m->playing && m->index == paused, "PauseResume resumes without resetting frame");
         ExecuteBang(data, L"pause");
         ExecuteBang(data, L"start");
         Assert(m->playing && m->index == 0 && m->repeats == 0, "Start restarts a paused animation");
@@ -212,6 +216,8 @@ int wmain(int argc, wchar_t** argv)
         Until([&] { return m->completed.load(); }, "One play-through completes");
         Assert(!m->playing && m->completed && m->index == 3, "Loop=0 stops on last frame");
         Assert(Update(data) == 20, "Completed playback reports effective speed");
+        ExecuteBang(data, L"PauseResume");
+        Assert(!m->playing && m->completed, "PauseResume does not restart completed playback");
         ExecuteBang(data, L"start");
         Assert(m->index == 0 && m->playing, "Start after completion restarts");
         ExecuteBang(data, L"end");
@@ -219,6 +225,8 @@ int wmain(int argc, wchar_t** argv)
         Assert(Update(data) == 20, "End retains fixed speed value");
         ExecuteBang(data, L"pause");
         Assert(!m->playing && !m->paused, "Pause does not start an ended animation");
+        ExecuteBang(data, L"PauseResume");
+        Assert(!m->playing && !m->paused, "PauseResume does not start an ended animation");
         options[L"Speed"] = L"30000";
         Reload(data, &options, &maximum);
         ExecuteBang(data, L"start");
@@ -251,8 +259,8 @@ int wmain(int argc, wchar_t** argv)
         Assert(m->interval == 250, "Automatic playback schedules next frame's distinct duration");
         ExecuteBang(data, L"pause");
         Assert(Update(data) == 250, "Automatic value reports paused frame's embedded duration");
-        ExecuteBang(data, L"pause");
-        Assert(m->index == 1 && m->interval == 250, "Automatic pause/resume retains frame and duration");
+        ExecuteBang(data, L"PauseResume");
+        Assert(m->playing && m->index == 1 && m->interval == 250, "Automatic PauseResume retains frame and duration");
         options[L"Speed"] = L"30";
         Reload(data, &options, &maximum);
         Assert(m->playing && m->index == 1 && m->interval == 30, "Dynamic switch to fixed duration");
@@ -286,8 +294,8 @@ int wmain(int argc, wchar_t** argv)
         ExecuteBang(data, L"pause");
         const auto heldRepeats = m->repeats.load();
         const auto heldFrame = m->index.load();
-        ExecuteBang(data, L"pause");
-        Assert(m->playing && m->repeats == heldRepeats && m->index == heldFrame, "Pause toggle preserves completed repeats");
+        ExecuteBang(data, L"PauseResume");
+        Assert(m->playing && m->repeats == heldRepeats && m->index == heldFrame, "PauseResume preserves completed repeats");
         options[L"ImageName"] = fixture(L"disposal.gif");
         options[L"Speed"] = L"50";
         options[L"MeterName"] = L"OtherImage";
@@ -320,7 +328,12 @@ int wmain(int argc, wchar_t** argv)
             ExecuteBang(data, L"pause");
             Assert(m->paused && !m->startWhenReady, "Pause during loading cancels deferred start");
             ExecuteBang(data, L"pause");
-            Assert(m->startWhenReady, "Pause toggle during loading resumes deferred start");
+            Assert(m->paused && !m->startWhenReady, "Repeated Pause during loading cannot resume deferred playback");
+            ExecuteBang(data, L"PauseResume");
+            Assert(m->startWhenReady, "PauseResume during loading resumes deferred start");
+            ExecuteBang(data, L"PauseResume");
+            Assert(m->paused && !m->startWhenReady, "PauseResume during loading toggles back to paused");
+            ExecuteBang(data, L"PauseResume");
             ExecuteBang(data, L"end");
             Assert(!m->startWhenReady && !m->paused, "End during loading cancels deferred playback");
             ExecuteBang(data, L"start");
