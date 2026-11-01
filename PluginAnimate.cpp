@@ -218,15 +218,22 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
     }
     if (m.meter.empty() || !m.animation) m.StopPlayback();
     else if (wasPlaying && (sourceChanged || speedChanged)) m.StartPlayback();
-    *maxValue = m.animation ? double(m.animation->frames.size()) : 0.0;
+    *maxValue = m.animation ? double(m.speed ? m.speed : *std::max_element(m.animation->delays.begin(), m.animation->delays.end())) : 0.0;
     lock.unlock();
     if (show) m.Show();
 }
 
 PLUGIN_EXPORT double Update(void* data)
 {
-    const auto& m = *static_cast<Measure*>(data);
-    return m.animation ? double(m.index.load() + 1) : 0.0;
+    auto& m = *static_cast<Measure*>(data);
+    std::lock_guard<std::mutex> lock(m.mutex);
+    return m.animation ? double(m.speed ? m.speed : m.animation->delays[m.index]) : 0.0;
+}
+
+PLUGIN_EXPORT LPCWSTR GetString(void* data)
+{
+    // Source changes only on the UI thread in Reload; the worker never modifies it.
+    return static_cast<Measure*>(data)->source.c_str();
 }
 
 PLUGIN_EXPORT void ExecuteBang(void* data, LPCWSTR args)

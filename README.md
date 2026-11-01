@@ -35,10 +35,21 @@ Options:
 | `Speed` | `0` uses each frame's embedded duration. Positive values override all frame durations in milliseconds, clamped to 10–2147483647 ms. | `0` |
 | `Loop` | Additional repeats after the first play-through: `0` plays once, `1` plays twice, `-1` repeats endlessly. Overrides embedded loop counts. | `0` |
 
-The measure's **numeric value is the current frame number, starting at 1**, or
-`0` when no source has been loaded successfully. Its maximum value is the total
-frame count. Rainmeter reads this value on measure updates; the Image meter
-advances independently, so a bound text meter samples it at the skin update rate.
+The measure's **numeric value is the effective frame delay in milliseconds**.
+For a positive Speed it returns that fixed duration. With `Speed=0`, it returns
+the current frame's embedded duration, including the documented minimum and
+rounding. Pausing retains the current frame's duration; ending reports the
+first frame's duration. It returns `0` when no source has loaded successfully.
+The maximum value is the fixed duration when overridden, or the largest embedded
+duration in the loaded animation when using source timing.
+
+The measure's **string value is the full path and filename of the source GIF or
+APNG**, resolved against the skin directory for relative paths. It does not
+return the extracted temporary frame path. Dynamic source changes update this
+string value. Rainmeter samples the numeric value on measure updates; animation
+playback continues independently of that sampling rate.
+In a dynamic String meter, `[MeasureAnimate:0]` displays the numeric delay with
+no decimal places; `[MeasureAnimate]` displays the source path.
 
 Commands (case insensitive):
 
