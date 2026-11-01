@@ -130,7 +130,7 @@ before writing their frame files.
 
 Closing or refreshing the skin cancels extraction and queues cleanup without
 waiting on the UI thread. The background worker retains the DLL until it has
-finished cancelling and deleting temporary files, so unloading the measure is
+finished canceling and deleting temporary files, so unloading the measure is
 safe even if a codec operation is still finishing. Only UI messages transfer a
 completed extraction or error back to Rainmeter; all Rainmeter API calls remain
 on the UI thread. Each measure has at most one extraction in progress.
@@ -178,8 +178,7 @@ animation in about **2.3 seconds** and observed the
 preview, all 235 extracted frames, and deletion of the preview after loading.
 Rainmeter answered **171 UI responsiveness probes with no timeouts**; the
 slowest response was **105.91 ms**. Other skins remained running. These are
-observations on the development machine, not timing guarantees. Raw live-test
-results are in [tests/live-load-results.json](tests/live-load-results.json).
+observations on the development machine, not timing guarantees.
 
 GIF transparency, offsets, and disposal are composited into full-canvas BMPs.
 APNG additionally supports SOURCE/OVER blending, BACKGROUND/PREVIOUS disposal,
@@ -201,12 +200,7 @@ conversion for fully opaque pixels. A standalone comparison using the same
 
 This trades temporary disk space for lower encoding CPU use and faster startup.
 Decoded pixel checksums matched for every frame. A separate alpha fixture
-verified transparency values of 0, 64, 128, and 255. The background-worker
-regression tests, run concurrently for both architectures, took about
-2.5–2.8 seconds including the preview. Timing depends on system load and storage.
-Raw samples are in [tests/extraction-benchmark-results.json](tests/extraction-benchmark-results.json).
-`tests/PrepareExtractionBench.py` generates the standalone profiling harness in
-the ignored `tests/x64/Bench` directory without changing production source.
+verified transparency values of 0, 64, 128, and 255.
 
 ## Measured CPU use
 
