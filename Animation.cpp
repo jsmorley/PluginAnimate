@@ -7,6 +7,9 @@
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
+#include <memory>
+#include <limits>
+#include "third_party/libwebp-1.6.0/src/webp/demux.h"
 
 using Microsoft::WRL::ComPtr;
 using Bytes = std::vector<BYTE>;
@@ -293,6 +296,69 @@ void Gif(IWICImagingFactory* factory, const std::wstring& path, Animation& outpu
         else if (r.dispose == 3) canvas.swap(previous);
     }
 }
+void Webp(IWICImagingFactory* factory, const Bytes& file, Animation& output, const std::function<bool()>& cancelled,
+    const std::function<void(const Animation&)>& firstFrame)
+{
+    const WebPData data{file.data(), file.size()};
+    // Inspect dimensions/counts before AnimDecoder allocates its compositing canvases.
+    std::unique_ptr<WebPDemuxer, decltype(&WebPDemuxDelete)> demux(WebPDemux(&data), WebPDemuxDelete);
+    Require(bool(demux), "Invalid or truncated WebP container");
+    Require((WebPDemuxGetI(demux.get(), WEBP_FF_FORMAT_FLAGS) & ANIMATION_FLAG) != 0, "WebP is not animated");
+    const UINT w = WebPDemuxGetI(demux.get(), WEBP_FF_CANVAS_WIDTH);
+    const UINT h = WebPDemuxGetI(demux.get(), WEBP_FF_CANVAS_HEIGHT);
+    const size_t size = PixelBytes(w, h);
+    const UINT count = WebPDemuxGetI(demux.get(), WEBP_FF_FRAME_COUNT);
+    Require(count && count <= MaxFrames && uint64_t(size) * count <= MaxOutputBytes,
+        "Animation exceeds extraction limits (10000 frames / 1 GiB decoded pixels)");
+    // libwebp's animation timestamps are signed int milliseconds. Check their
+    // cumulative range before decoding, including animations with huge delays.
+    {
+        struct Iterator
+        {
+            WebPIterator frame{};
+            ~Iterator() { WebPDemuxReleaseIterator(&frame); }
+        } iterator;
+        Require(WebPDemuxGetFrame(demux.get(), 1, &iterator.frame) != 0, "Missing WebP frame");
+        uint64_t duration = 0;
+        for (UINT i = 0; i < count; ++i)
+        {
+            Cancel(cancelled);
+            duration += static_cast<UINT>(iterator.frame.duration);
+            Require(iterator.frame.complete && duration <= uint64_t((std::numeric_limits<int>::max)()),
+                "Incomplete WebP frame or excessive animation duration");
+            if (i + 1 < count) Require(WebPDemuxNextFrame(&iterator.frame) != 0, "Missing WebP frame");
+        }
+    }
+    demux.reset();
+    Cancel(cancelled);
+    WebPAnimDecoderOptions options{};
+    Require(WebPAnimDecoderOptionsInit(&options) != 0, "Cannot initialize WebP decoder");
+    options.color_mode = MODE_bgrA; // Premultiplied BGRA, matching the other decoders.
+    options.use_threads = 0; // Already on our background loader; avoid extra codec threads.
+    std::unique_ptr<WebPAnimDecoder, decltype(&WebPAnimDecoderDelete)> decoder(
+        WebPAnimDecoderNew(&data, &options), WebPAnimDecoderDelete);
+    Require(bool(decoder), "Cannot decode WebP animation");
+    Bytes canvas(size);
+    int previous = 0;
+    for (UINT i = 0; i < count; ++i)
+    {
+        Cancel(cancelled);
+        uint8_t* pixels = nullptr;
+        int timestamp = 0;
+        Require(WebPAnimDecoderGetNext(decoder.get(), &pixels, &timestamp) != 0 && timestamp >= previous,
+            "Invalid WebP frame data");
+        Cancel(cancelled);
+        std::memcpy(canvas.data(), pixels, size);
+        Save(factory, output, canvas, w, h, cancelled);
+        output.delays.push_back((std::max)(UINT(USER_TIMER_MINIMUM), UINT(timestamp - previous)));
+        previous = timestamp;
+        if (!i && firstFrame)
+        {
+            MakePreview(factory, output, canvas, w, h, cancelled);
+            firstFrame(output);
+        }
+    }
+}
 void Apng(IWICImagingFactory* factory, const Bytes& file, Animation& output, const std::function<bool()>& cancelled,
     const std::function<void(const Animation&)>& firstFrame)
 {
@@ -451,10 +517,16 @@ void ExtractAnimation(const std::wstring& path, Animation& output, const std::fu
     Require(CreateDirectoryW(directory.c_str(), nullptr) != FALSE, "Cannot create frame directory");
     output.directory = directory;
     if (gif) Gif(factory.Get(), path, output, cancelled, firstFrame);
+    else if (bytes.size() >= 12 && std::memcmp(bytes.data(), "RIFF", 4) == 0 && std::memcmp(bytes.data() + 8, "WEBP", 4) == 0)
+    {
+        const uint32_t riffSize = uint32_t(bytes[4]) | uint32_t(bytes[5]) << 8 | uint32_t(bytes[6]) << 16 | uint32_t(bytes[7]) << 24;
+        Require(uint64_t(riffSize) + 8 == bytes.size(), "Invalid WebP RIFF length");
+        Webp(factory.Get(), bytes, output, cancelled, firstFrame);
+    }
     else
     {
         const BYTE signature[] = {137, 80, 78, 71, 13, 10, 26, 10};
-        Require(std::memcmp(bytes.data(), signature, 8) == 0, "Input must be GIF or animated PNG");
+        Require(std::memcmp(bytes.data(), signature, 8) == 0, "Input must be GIF, animated PNG, or animated WebP");
         Apng(factory.Get(), bytes, output, cancelled, firstFrame);
     }
     Cancel(cancelled);

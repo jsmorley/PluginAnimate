@@ -1,8 +1,11 @@
 # Animate.dll
 
-Native C++ Rainmeter plugin for animated GIF and APNG files. Frames are decoded
+Native C++ Rainmeter plugin for animated GIF, APNG, and WebP files. Frames are decoded
 once into 32-bit BMP V5 files with alpha; a normal `Meter=Image` displays them. No external codec, command
 line program, or C++ runtime installation is required.
+
+For a comparison of image formats, see SVGator's
+[GIF vs PNG vs JPEG vs WebP image formats guide](https://www.svgator.com/blog/gif-vs-png-jpeg-webp-image-formats-guide/).
 
 ```ini
 [MeasureAnimate]
@@ -25,7 +28,7 @@ Options:
 
 | Option | Meaning | Default |
 | --- | --- | --- |
-| `ImageName` | Path and filename of GIF or APNG (including APNG with `.png` extension). Relative paths resolve against the skin directory. | Empty |
+| `ImageName` | Path and filename of animated GIF, APNG (including `.png`), or WebP. Relative paths resolve against the skin directory. | Empty |
 | `MeterName` | Section name of the existing Image meter in the same skin. | Empty |
 | `DisplayLoading` | `0` shows the plain first frame while loading; `1` shows a preview with centered Loading... text. | `0` |
 | `Speed` | `0` uses each frame's embedded duration. Positive values override all frame durations in milliseconds, clamped to 10–2147483647 ms. | `0` |
@@ -40,8 +43,8 @@ once available, or `0` before the preview exists or if loading fails.
 The maximum value is the fixed duration when overridden, or the largest embedded
 duration in the loaded animation when using source timing.
 
-The measure's **string value is the full path and filename of the source GIF or
-APNG**, resolved against the skin directory for relative paths. It does not
+The measure's **string value is the full path and filename of the source GIF,
+APNG, or WebP**, resolved against the skin directory for relative paths. It does not
 return the extracted temporary frame path. Dynamic source changes update this
 string value. Rainmeter samples the numeric value on measure updates; animation
 playback continues independently of that sampling rate.
@@ -86,7 +89,7 @@ the frames remain available for a later `Start`.
 
 ## Embedded frame timing (`Speed=0`)
 
-Both formats store a duration for each frame; durations may vary within a file.
+All three formats store a duration for each frame; durations may vary within a file.
 With `Speed=0` (the default when omitted), Animate reads these durations once during extraction and schedules
 each displayed frame using its own delay. A positive Speed overrides them all.
 
@@ -95,10 +98,13 @@ each displayed frame using its own delay. A positive Speed overrides them all.
 - **APNG:** delay is stored as a fraction of a second:
   `1000 × delay_num / delay_den` gives milliseconds.
   [APNG specification](https://www.w3.org/TR/png/)
+- **WebP:** each `ANMF` frame stores its duration directly in milliseconds.
+  A value of `80` means **80 ms**.
+  [WebP container specification](https://developers.google.com/speed/webp/docs/riff_container#animation)
 
 For APNG, a zero denominator is treated as `100`, as specified by the format.
 Fractional milliseconds are rounded to the nearest whole millisecond. A zero
-delay in either format is clamped to the minimum playback duration of **10 ms**;
+delay in any supported format is clamped to the minimum playback duration of **10 ms**;
 a GIF frame with no delay metadata uses **100 ms**. These bounds avoid a busy
 loop. A worker thread sleeps until each frame's deadline using a condition
 variable, with no polling. Variable frame delays use the same worker thread.
@@ -106,6 +112,10 @@ The last frame's delay also elapses before completion or looping.
 
 The example starts with source timing enabled and provides an **Auto** button
 to restore `Speed=0` after using its fixed-speed buttons.
+Its **GIF**, **APNG**, and **WebP** buttons switch between the bundled samples.
+The WebP sample is `@Resources\DancingBanana.webp` (8 frames, 4,764 bytes),
+linked from [Google's WebP FAQ](https://developers.google.com/speed/webp/faq#why_should_i_use_animated_webp).
+See [sample attribution](examples/Animate/@Resources/SOURCES.md).
 
 With `DynamicVariables=1`, Rainmeter rereads options on measure updates. After
 changing variables or options, use `!UpdateMeasure MeasureAnimate` to apply them
@@ -159,7 +169,7 @@ Every measure has a unique `%TEMP%\Rainmeter-Animate-{GUID}` folder, where
 directory. It is discarded as soon as the full animation is ready.
 
 These are full-canvas, uncompressed 32-bit BMP V5 frames, including those
-extracted from APNG sources. The V5 header includes an explicit alpha mask,
+extracted from APNG and WebP sources. The V5 header includes an explicit alpha mask,
 preserving transparency. Windows 8 or later is required for WIC BMP V5 alpha
 support. The single annotated loading preview remains a PNG.
 Each plugin measure owns a separate folder, even when measures use the same
@@ -184,10 +194,48 @@ observations on the development machine, not timing guarantees.
 
 GIF transparency, offsets, and disposal are composited into full-canvas BMPs.
 APNG additionally supports SOURCE/OVER blending, BACKGROUND/PREVIOUS disposal,
-and an excluded default poster image. Limits: 256 MiB input, 16 megapixels per
+and an excluded default poster image. WebP supports lossy and lossless frames,
+alpha, frame offsets, SOURCE/OVER blending, and background disposal through
+Google's statically linked libwebp decoder. WebP decoding runs on the same
+background loader and publishes the same first-frame preview; playback still
+uses the extracted BMPs, so no WebP decoding occurs during playback.
+Limits: 256 MiB input, 16 megapixels per
 canvas, 10,000 frames, and 1 GiB of cumulative decoded frame pixels. Decoder
 errors appear in Rainmeter's log. Meter names and temporary paths containing
 quotes, square brackets, or newlines cannot be used in generated bangs.
+WebP's cumulative source duration is additionally limited to 2,147,483,647 ms
+(about 24.9 days) because libwebp uses signed 32-bit animation timestamps.
+Static WebP files are rejected, as are nonanimated PNGs.
+
+## Building
+
+Build `PluginAnimate.vcxproj` with Visual Studio's C++ tools and Windows SDK,
+using `Release|x64` or `Release|Win32`. Keep this folder under the Rainmeter
+plugin SDK's `C++` directory: the plugin references the local SDK at
+`../../API/RainmeterAPI.h` and its matching `API/x64` or `API/x32` library.
+The SDK is not bundled.
+
+The included libwebp **1.6.0** decoder sources compile directly into `Animate.dll`
+through `third_party/WebP.props`; no additional dependency setup is required.
+Its provenance and license notices are in [third_party](third_party/README.md).
+Binary distributions must retain the libwebp notices provided in
+`Releases/WEBP-NOTICES.txt`.
+
+`tests/Tests.vcxproj` exercises GIF/APNG/WebP pixels, timing, transparency,
+blending/disposal, cancellation, malformed inputs, playback commands, and cleanup.
+Run its executable from the repository root. The committed fixtures need no
+Python dependencies; regenerating WebP fixtures uses Pillow as described in
+`tests/generate_webp_fixtures.py`.
+
+Version 1.4.0 validation (November 1, 2026): the native x64 and Win32 regression
+suites passed, including WebP alpha, offsets, blending/disposal, embedded
+timing, command behavior, source switching, cancellation, and rejected inputs.
+A five-second test in running Rainmeter extracted all eight DancingBanana
+frames, observed the preview and its cleanup, and recorded **43 UI responses,
+zero timeouts**, with a **34.84 ms** maximum response. Readiness was observed
+after **2,329 ms**, including bang dispatch and polling overhead; this is not a
+decoder-only extraction benchmark. Full results are in
+`tests/live-webp-results.json`.
 
 ## Extraction performance
 

@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$GifPath,
     [int]$DurationSeconds = 20,
-    [int]$ExpectedFrames = 0
+    [int]$ExpectedFrames = 0,
+    [string]$ResultPath = (Join-Path $PSScriptRoot 'live-load-results.json')
 )
 $ErrorActionPreference = 'Stop'
 $animationPath = (Resolve-Path -LiteralPath $GifPath).Path
@@ -79,7 +80,7 @@ try {
         FramesExtracted = $frames
         PreviewDiscarded = [bool]$discarded
     }
-    $result | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'live-load-results.json') -Encoding utf8
+    $result | ConvertTo-Json | Set-Content -LiteralPath $ResultPath -Encoding utf8
     $result | ConvertTo-Json | Write-Output
     if ($timeouts) { throw 'Rainmeter failed one or more 250 ms responsiveness probes.' }
     if (-not $frames) { throw 'No extraction was observed; responsiveness alone is not a valid load test.' }

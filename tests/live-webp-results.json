@@ -1,0 +1,13 @@
+{
+  "File": "DancingBanana.webp",
+  "FrameFormat": "32-bit BMP V5",
+  "ReadyMilliseconds": 2328.5588,
+  "DurationSeconds": 5.0507292,
+  "SuccessfulUiResponses": 43,
+  "UiTimeouts": 0,
+  "MaximumUiResponseMilliseconds": 34.8415,
+  "AverageUiResponseMilliseconds": 2.09013488372093,
+  "PreviewObserved": true,
+  "FramesExtracted": 8,
+  "PreviewDiscarded": true
+}

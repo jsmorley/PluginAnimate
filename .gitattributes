@@ -11,3 +11,7 @@
 *.gif binary
 *.apng binary
 *.png binary
+*.webp binary
+
+# Preserve upstream source line endings and its license's trailing blank line.
+third_party/libwebp-1.6.0/** text eol=lf whitespace=-blank-at-eof

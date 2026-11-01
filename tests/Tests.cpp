@@ -130,6 +130,59 @@ int wmain(int argc, wchar_t** argv)
             Assert(input && header[0] == 'B' && header[1] == 'M' && little32(14) == 124 && header[28] == 32 &&
                 little32(66) == 0xff000000, "Frames have a 32-bit BMP V5 header and explicit alpha mask");
         }
+        {
+            Animation webp;
+            bool preview = false;
+            ExtractAnimation(fixture(L"blend.webp"), webp, {}, [&](const Animation& first) {
+                Assert(first.frames.size() == 1 && first.delays[0] == 80 && !first.preview.empty(), "WebP first-frame preview");
+                preview = true;
+            });
+            Assert(preview && webp.frames.size() == 4 && webp.delays == std::vector<UINT>({80,250,10,333}),
+                "WebP millisecond timing, zero-delay minimum, frame count");
+            Assert(ReadPixels(webp.frames[0]) == std::vector<BYTE>({0,0,255,255,0,0,255,255,0,0,255,255,0,0,255,255}),
+                "WebP first full canvas");
+            const auto mixed = ReadPixels(webp.frames[1]);
+            Assert(mixed[0] == 128 && mixed[2] == 127 && mixed[3] == 255 && mixed[8] == 0 && mixed[10] == 255,
+                "WebP OVER blends partial alpha and retains uncovered canvas");
+            Assert(ReadPixels(webp.frames[2]) == std::vector<BYTE>({0,0,0,0,0,0,0,0,0,255,0,255,0,255,0,255}),
+                "WebP BACKGROUND disposal and frame offset");
+            Assert(ReadPixels(webp.frames[3]) == std::vector<BYTE>(16,0), "WebP transparent SOURCE replaces canvas");
+            Animation alpha, lossy;
+            ExtractAnimation(fixture(L"alpha.webp"), alpha);
+            const auto rgba = ReadPixels(alpha.frames[0]);
+            Assert(rgba[3] == 0 && rgba[7] == 64 && rgba[11] == 128 && rgba[15] == 255 && rgba[12] == 200,
+                "WebP alpha preserved in BMP V5");
+            ExtractAnimation(fixture(L"lossy.webp"), lossy);
+            const auto rgb = ReadPixels(lossy.frames[0]);
+            Assert(lossy.frames.size() == 2 && lossy.delays == std::vector<UINT>({40,60}) && rgb[2] > 240 && rgb[3] == 255,
+                "Lossy WebP decoding");
+            Animation sample;
+            ExtractAnimation(L"examples/Animate/@Resources/DancingBanana.webp", sample);
+            Assert(sample.frames.size() == 8, "Bundled animated WebP example decodes");
+        }
+        for (const auto* name : {L"bad.webp", L"truncated.webp", L"oversized.webp", L"static.webp", L"excessive-duration.webp"})
+        {
+            std::wstring dir;
+            {
+                Animation bad;
+                bool rejected = false;
+                try { ExtractAnimation(fixture(name), bad); } catch (const std::runtime_error&) { rejected = true; }
+                dir = bad.directory;
+                Assert(rejected, "Reject invalid, static, oversized, or excessive-duration WebP");
+            }
+            Assert(dir.empty() || !std::filesystem::exists(dir), "Rejected WebP removes partial output");
+        }
+        {
+            std::wstring dir;
+            bool cancelled = false;
+            {
+                Animation partial;
+                try { ExtractAnimation(fixture(L"blend.webp"), partial, [&] { return !partial.frames.empty(); }); }
+                catch (const AnimationCancelled&) { cancelled = true; }
+                dir = partial.directory;
+            }
+            Assert(cancelled && !std::filesystem::exists(dir), "WebP cancellation cleans extracted frames");
+        }
         std::wstring badDir;
         {
             Animation bad;
@@ -306,6 +359,24 @@ int wmain(int argc, wchar_t** argv)
         Assert(!std::filesystem::exists(oldDir), "Source replacement removes old folder");
         Assert(std::wstring(GetString(data)) == fixture(L"disposal.gif"), "Dynamic source changes string value");
         Assert(commands.back().find(L"[!UpdateMeter \"OtherImage\"]") != std::wstring::npos, "Targets normal image meter");
+        options[L"ImageName"] = fixture(L"blend.webp");
+        options[L"Speed"] = L"0";
+        options[L"Loop"] = L"0"; // Overrides the WebP's embedded three loops.
+        Reload(data, &options, &maximum);
+        ExecuteBang(data, L"start");
+        Until([&] { return !m->loading; }, "WebP asynchronous source switch finishes");
+        Reload(data, &options, &maximum);
+        Assert(m->animation && m->playing && maximum == 333 && Update(data) == 80 &&
+            std::wstring(GetString(data)) == fixture(L"blend.webp"), "WebP source path and effective timing outputs");
+        ExecuteBang(data, L"pause");
+        const auto webpFrame = m->index.load();
+        Pump(100);
+        Assert(!m->playing && m->index == webpFrame, "WebP pause suspends playback");
+        ExecuteBang(data, L"PauseResume");
+        Until([&] { return m->completed.load(); }, "WebP plays once despite embedded loop count");
+        Assert(m->index == 3 && m->repeats == 0 && Update(data) == 333, "WebP loop override and final delay");
+        ExecuteBang(data, L"end");
+        Assert(m->index == 0 && !m->playing && Update(data) == 80, "WebP End resets to first frame");
         auto finalDir = m->animation->directory;
         std::weak_ptr<AsyncLoader> cleanup = m->loader;
         Finalize(data);
@@ -407,7 +478,7 @@ int wmain(int argc, wchar_t** argv)
             std::cout << "Large GIF: source-change cancellation and unload cleanup passed; Finalize " << closeMs << " ms\n";
         }
         CoUninitialize();
-        std::cout << "PASS: GIF/APNG pixels, transparency, disposal, poster exclusion, corruption, timers, pause/resume, loops, reload, cleanup\n";
+        std::cout << "PASS: GIF/APNG/WebP pixels, transparency, disposal, poster exclusion, corruption, timers, pause/resume, loops, reload, cleanup\n";
         return 0;
     }
     catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }
