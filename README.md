@@ -131,61 +131,6 @@ canvas, 10,000 frames, and 1 GiB of cumulative decoded frame pixels. Decoder
 errors appear in Rainmeter's log. Meter names and temporary paths containing
 quotes, square brackets, or newlines cannot be used in generated bangs.
 
-## Build and install
-
-Place this repository at `C++\PluginAnimate` inside a local
-[Rainmeter plugin SDK](https://github.com/rainmeter/rainmeter-plugin-sdk)
-checkout. The plugin's C++ source directly includes
-`../../API/RainmeterAPI.h`, and the project links the local SDK's
-`API\x32\Rainmeter.lib` or `API\x64\Rainmeter.lib`. SDK files are not bundled
-in this repository.
-
-Open `PluginAnimate.vcxproj` in Visual Studio with Desktop development with C++
-and a Windows 10/11 SDK installed, or run from a Developer PowerShell in this
-repository's directory:
-
-```powershell
-msbuild PluginAnimate.vcxproj /p:Configuration=Release /p:Platform=x64
-msbuild PluginAnimate.vcxproj /p:Configuration=Release /p:Platform=Win32
-```
-
-Outputs are `x64\Release\Animate.dll` and `x32\Release\Animate.dll`. Copy the
-matching architecture to `%APPDATA%\Rainmeter\Plugins\Animate.dll`.
-Copy the entire `examples\Animate` directory into your Rainmeter skins folder,
-then refresh Rainmeter's skin list and load `Animate\Animate.ini`.
-`Example.ini` is also provided at the repository root as a convenient copy.
-The Image meter spans the background's width and fits the selected animation
-into a 125-pixel-high area above the controls. `PreserveAspectRatio=1` centers
-the image in that area while preserving its proportions for any chosen source.
-
-The example starts with `@Resources\Loading.gif`. To try the included APNG, set
-`AnimationFile=#@#BeachBall.apng` under `[Variables]` and refresh the skin.
-The public-domain APNG is Holger Will's 100 × 100 pixel bouncing beach ball with
-20 frames. Source and licensing are recorded in
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
-
-The source is licensed under GNU GPL v2; see [LICENSE](LICENSE) and the
-third-party notices.
-
-## Verification
-
-Tests use the actual decoder, worker thread, and Windows message loop with a mocked
-Rainmeter host boundary. No live Rainmeter installation is modified by tests.
-
-```powershell
-python tests\generate_fixtures.py
-msbuild tests\Tests.vcxproj /p:Configuration=Release /p:Platform=x64
-.\tests\x64\Release\Tests.exe
-msbuild tests\Tests.vcxproj /p:Configuration=Release /p:Platform=Win32
-.\tests\x32\Release\Tests.exe
-```
-
-Run from this project directory. Tests verify decoded pixel values, alpha
-blending, disposal, poster exclusion, corrupt-file rejection, timer playback
-without measure updates, per-frame durations, fixed/embedded timing switches,
-zero/missing delays, playback during a blocked UI, pause/resume, repeat counts, dynamic source/speed/meter
-changes, and directory cleanup on replacement and finalization.
-
 ## Measured CPU use
 
 Measured on October 31, 2026 using 64-bit Rainmeter and the installed Animate
@@ -218,18 +163,3 @@ variation can affect the difference. This measures ongoing playback after
 extraction, not initial frame extraction, and is not a performance guarantee for
 other files, frame rates, skin configurations, or hardware. CPU-cycle counts
 are machine-specific counters and are not converted into elapsed time.
-
-Raw samples are in [tests/cpu-results.json](tests/cpu-results.json). To repeat
-the measurement with the example already loaded and running:
-
-```powershell
-.\tests\MeasureCpu.ps1 -SampleSeconds 30
-```
-
-The script temporarily pauses and resumes `MeasureAnimate` in the `Animate`
-skin, writes `tests/cpu-results.json`, and leaves playback running afterward.
-Repeating it replaces the saved raw samples.
-
-References: [Rainmeter C++ SDK](https://docs.rainmeter.net/developers/plugin/cpp/),
-[PNG/APNG specification](https://www.w3.org/TR/png/),
-[WIC GIF metadata](https://learn.microsoft.com/en-us/windows/win32/wic/-wic-native-image-format-metadata-queries).
