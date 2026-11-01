@@ -1,0 +1,11 @@
+# Visual Studio build outputs (Releases contains published binaries).
+/x32/
+/x64/
+/tests/x32/
+/tests/x64/
+/.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+__pycache__/

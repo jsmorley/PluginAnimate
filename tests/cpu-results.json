@@ -1,0 +1,39 @@
+{
+  "ProcessId": 3392,
+  "LogicalProcessors": 16,
+  "SampleSecondsRequested": 30,
+  "Samples": [
+    {
+      "State": "Paused",
+      "ElapsedSeconds": 30.1862895,
+      "CpuSeconds": 1.953125,
+      "CpuPercentMachine": 0.40438992178883065,
+      "CpuPercentOneCore": 6.4702387486212904,
+      "CpuCycles": 7828250950
+    },
+    {
+      "State": "Playing",
+      "ElapsedSeconds": 30.2089168,
+      "CpuSeconds": 3.296875,
+      "CpuPercentMachine": 0.6820988943900166,
+      "CpuPercentOneCore": 10.913582310240265,
+      "CpuCycles": 12203485410
+    },
+    {
+      "State": "Playing",
+      "ElapsedSeconds": 30.226195,
+      "CpuSeconds": 3.359375,
+      "CpuPercentMachine": 0.6946323792988168,
+      "CpuPercentOneCore": 11.11411806878107,
+      "CpuCycles": 12086778530
+    },
+    {
+      "State": "Paused",
+      "ElapsedSeconds": 30.1940821,
+      "CpuSeconds": 2.078125,
+      "CpuPercentMachine": 0.43015983088951065,
+      "CpuPercentOneCore": 6.88255729423217,
+      "CpuCycles": 7634811990
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+* text=auto
+*.cpp text eol=crlf
+*.h text eol=crlf
+*.ini text eol=crlf
+*.vcxproj text eol=crlf
+*.md text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.dll binary
+*.lib binary
+*.gif binary
+*.apng binary
+*.png binary
