@@ -162,7 +162,7 @@ void MakePreview(IWICImagingFactory* factory, Animation& output, const Bytes& ca
         TextMask mask;
         mask.dc = CreateCompatibleDC(nullptr);
         Require(mask.dc != nullptr, "Cannot create loading-preview text context");
-        const int fontHeight = static_cast<int>((std::clamp)((std::min)(h / 12, w / 10), 8u, 128u));
+        constexpr int fontHeight = 12;
         mask.font = CreateFontW(-fontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         Require(mask.font != nullptr, "Cannot create loading-preview font");
@@ -170,7 +170,7 @@ void MakePreview(IWICImagingFactory* factory, Animation& output, const Bytes& ca
         constexpr wchar_t text[] = L"Loading...";
         SIZE extent{};
         Require(GetTextExtentPoint32W(mask.dc, text, 10, &extent) != FALSE, "Cannot measure loading text");
-        const UINT padding = (std::max)(4u, UINT(fontHeight / 4));
+        constexpr UINT padding = 2;
         const UINT pw = (std::min)(w, UINT(extent.cx) + padding * 2);
         const UINT ph = (std::min)(h, UINT(extent.cy) + padding * 2);
         BITMAPINFO info{};

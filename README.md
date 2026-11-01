@@ -70,7 +70,7 @@ Natural completion leaves the last frame displayed.
 Loading a source happens asynchronously. As soon as the first frame is decoded,
 the Image meter displays it while the remaining frames are extracted.
 With `DisplayLoading=1`, it displays a separate `loading.png` preview with **Loading...**
-superimposed in small, normal-weight text over a compact translucent dark panel
+superimposed in fixed 12-pixel, normal-weight text in the preview image, over a compact translucent dark panel
 in the center. This annotation is
 drawn into the preview PNG by the plugin; no extra String meter is required.
 `DisplayLoading=0` is the default and uses the plain first frame,
