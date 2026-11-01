@@ -17,6 +17,10 @@ constexpr size_t MaxFrames = 10000;
 constexpr uint64_t MaxOutputBytes = 1024ull * 1024 * 1024;
 void Check(HRESULT hr) { if (FAILED(hr)) throw std::runtime_error("Windows image codec operation failed"); }
 void Require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
+void Cancel(const std::function<bool()>& cancelled)
+{
+    if (cancelled && cancelled()) throw AnimationCancelled();
+}
 size_t PixelBytes(UINT w, UINT h)
 {
     Require(w && h && uint64_t(w) * h <= MaxPixels, "Invalid or excessive canvas dimensions");
@@ -30,10 +34,24 @@ struct ComScope
 };
 uint32_t Read32(const BYTE* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3]; }
 void Put32(Bytes& b, uint32_t n) { for (int s = 24; s >= 0; s -= 8) b.push_back(BYTE(n >> s)); }
-uint32_t Crc(const BYTE* p, size_t n)
+uint32_t Crc(const BYTE* p, size_t n, const std::function<bool()>& cancelled = {})
 {
+    static const auto table = [] {
+        std::array<uint32_t, 256> values{};
+        for (uint32_t i = 0; i < 256; ++i)
+        {
+            uint32_t c = i;
+            for (int bit = 0; bit < 8; ++bit) c = (c >> 1) ^ (0xedb88320u & (0u - (c & 1)));
+            values[i] = c;
+        }
+        return values;
+    }();
     uint32_t c = 0xffffffff;
-    while (n--) { c ^= *p++; for (int i = 0; i < 8; ++i) c = (c >> 1) ^ (0xedb88320u & (0u - (c & 1))); }
+    for (size_t i = 0; i < n; ++i)
+    {
+        if (!(i & 65535)) Cancel(cancelled);
+        c = table[(c ^ p[i]) & 255] ^ (c >> 8);
+    }
     return c ^ 0xffffffff;
 }
 void Chunk(Bytes& out, const char* type, const Bytes& data)
@@ -76,13 +94,10 @@ void Composite(Bytes& canvas, UINT width, const Bytes& pixels, const Rect& r)
                 d[c] = r.blend ? BYTE(s[c] + (unsigned(d[c]) * (255 - s[3]) + 127) / 255) : s[c];
         }
 }
-void Save(IWICImagingFactory* factory, Animation& output, const Bytes& canvas, UINT w, UINT h)
+void SavePng(IWICImagingFactory* factory, const std::wstring& path, const Bytes& canvas, UINT w, UINT h,
+    const std::function<bool()>& cancelled)
 {
-    Require(output.frames.size() < MaxFrames && uint64_t(canvas.size()) * (output.frames.size() + 1) <= MaxOutputBytes,
-        "Animation exceeds extraction limits (10000 frames / 1 GiB decoded pixels)");
-    std::wstring path = output.directory + L"\\frame-" + std::to_wstring(output.frames.size()) + L".png";
-    // Register before writing, so failed/partial writes are cleaned up too.
-    output.frames.push_back(path);
+    Cancel(cancelled);
     ComPtr<IWICStream> stream;
     Check(factory->CreateStream(&stream));
     Check(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE));
@@ -99,11 +114,101 @@ void Save(IWICImagingFactory* factory, Animation& output, const Bytes& canvas, U
     // PNG stores straight alpha; undo premultiplication used during compositing.
     Bytes straight(canvas);
     for (size_t i = 0; i < straight.size(); i += 4)
+    {
+        if (!(i & 65535)) Cancel(cancelled);
         for (size_t c = 0; c < 3; ++c)
             straight[i + c] = straight[i + 3] ? BYTE((std::min)(255u, (unsigned(straight[i + c]) * 255 + straight[i + 3] / 2) / straight[i + 3])) : 0;
-    Check(frame->WritePixels(h, w * 4, static_cast<UINT>(straight.size()), straight.data()));
+    }
+    for (UINT row = 0; row < h; row += 32)
+    {
+        Cancel(cancelled);
+        const UINT rows = (std::min)(32u, h - row);
+        Check(frame->WritePixels(rows, w * 4, rows * w * 4, straight.data() + size_t(row) * w * 4));
+    }
+    Cancel(cancelled);
     Check(frame->Commit());
     Check(encoder->Commit());
+}
+void Save(IWICImagingFactory* factory, Animation& output, const Bytes& canvas, UINT w, UINT h, const std::function<bool()>& cancelled)
+{
+    Require(output.frames.size() < MaxFrames && uint64_t(canvas.size()) * (output.frames.size() + 1) <= MaxOutputBytes,
+        "Animation exceeds extraction limits (10000 frames / 1 GiB decoded pixels)");
+    std::wstring path = output.directory + L"\\frame-" + std::to_wstring(output.frames.size()) + L".png";
+    output.frames.push_back(path); // Track partial writes for cleanup too.
+    SavePng(factory, path, canvas, w, h, cancelled);
+}
+struct TextMask
+{
+    HDC dc = nullptr;
+    HFONT font = nullptr;
+    HBITMAP bitmap = nullptr;
+    HGDIOBJ oldFont = nullptr, oldBitmap = nullptr;
+    ~TextMask()
+    {
+        if (oldBitmap) SelectObject(dc, oldBitmap);
+        if (oldFont) SelectObject(dc, oldFont);
+        if (bitmap) DeleteObject(bitmap);
+        if (font) DeleteObject(font);
+        if (dc) DeleteDC(dc);
+    }
+};
+void MakePreview(IWICImagingFactory* factory, Animation& output, const Bytes& canvas, UINT w, UINT h,
+    const std::function<bool()>& cancelled)
+{
+    Cancel(cancelled);
+    Bytes pixels(canvas); // The real first frame and compositing canvas are never modified.
+    if (w >= 32 && h >= 16)
+    {
+        TextMask mask;
+        mask.dc = CreateCompatibleDC(nullptr);
+        Require(mask.dc != nullptr, "Cannot create loading-preview text context");
+        const int fontHeight = static_cast<int>((std::clamp)((std::min)(h / 12, w / 10), 8u, 128u));
+        mask.font = CreateFontW(-fontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        Require(mask.font != nullptr, "Cannot create loading-preview font");
+        mask.oldFont = SelectObject(mask.dc, mask.font);
+        constexpr wchar_t text[] = L"Loading...";
+        SIZE extent{};
+        Require(GetTextExtentPoint32W(mask.dc, text, 10, &extent) != FALSE, "Cannot measure loading text");
+        const UINT padding = (std::max)(4u, UINT(fontHeight / 4));
+        const UINT pw = (std::min)(w, UINT(extent.cx) + padding * 2);
+        const UINT ph = (std::min)(h, UINT(extent.cy) + padding * 2);
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = static_cast<LONG>(pw);
+        info.bmiHeader.biHeight = -static_cast<LONG>(ph);
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        mask.bitmap = CreateDIBSection(mask.dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+        Require(mask.bitmap && bits, "Cannot create loading-preview text bitmap");
+        mask.oldBitmap = SelectObject(mask.dc, mask.bitmap);
+        std::memset(bits, 0, size_t(pw) * ph * 4);
+        SetBkMode(mask.dc, TRANSPARENT);
+        SetTextColor(mask.dc, RGB(255, 255, 255));
+        RECT rect{0, 0, static_cast<LONG>(pw), static_cast<LONG>(ph)};
+        Require(DrawTextW(mask.dc, text, 10, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX) != 0,
+            "Cannot render loading-preview text");
+        GdiFlush();
+        const auto* coverage = static_cast<const BYTE*>(bits);
+        const UINT left = (w - pw) / 2, top = (h - ph) / 2;
+        for (UINT y = 0; y < ph; ++y)
+        {
+            Cancel(cancelled);
+            for (UINT x = 0; x < pw; ++x)
+            {
+                BYTE* d = pixels.data() + (size_t(y + top) * w + x + left) * 4;
+                // A translucent black panel keeps white text readable on any frame.
+                for (int c = 0; c < 3; ++c) d[c] = BYTE((unsigned(d[c]) * 55 + 127) / 255);
+                d[3] = BYTE(200 + (unsigned(d[3]) * 55 + 127) / 255);
+                const unsigned alpha = coverage[(size_t(y) * pw + x) * 4];
+                for (int c = 0; c < 4; ++c) d[c] = BYTE(alpha + (unsigned(d[c]) * (255 - alpha) + 127) / 255);
+            }
+        }
+    }
+    output.preview = output.directory + L"\\loading.png";
+    SavePng(factory, output.preview, pixels, w, h, cancelled);
 }
 UINT Metadata(IWICMetadataQueryReader* reader, const wchar_t* name, UINT fallback = 0)
 {
@@ -118,10 +223,12 @@ UINT Metadata(IWICMetadataQueryReader* reader, const wchar_t* name, UINT fallbac
     PropVariantClear(&value);
     return result;
 }
-void Gif(IWICImagingFactory* factory, const std::wstring& path, Animation& output)
+void Gif(IWICImagingFactory* factory, const std::wstring& path, Animation& output, const std::function<bool()>& cancelled,
+    const std::function<void(const Animation&)>& firstFrame)
 {
     ComPtr<IWICBitmapDecoder> decoder;
-    Check(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder));
+    Check(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder));
+    Cancel(cancelled);
     ComPtr<IWICMetadataQueryReader> global;
     Check(decoder->GetMetadataQueryReader(&global));
     UINT w = Metadata(global.Get(), L"/logscrdesc/Width"), h = Metadata(global.Get(), L"/logscrdesc/Height");
@@ -129,6 +236,7 @@ void Gif(IWICImagingFactory* factory, const std::wstring& path, Animation& outpu
     UINT count;
     Check(decoder->GetFrameCount(&count));
     Require(count && count <= MaxFrames, "Invalid or excessive GIF frame count");
+    Require(uint64_t(canvas.size()) * count <= MaxOutputBytes, "Animation exceeds extraction limits (1 GiB decoded pixels)");
     std::array<BYTE, 4> background{};
     ComPtr<IWICPalette> palette;
     Check(factory->CreatePalette(&palette));
@@ -143,12 +251,14 @@ void Gif(IWICImagingFactory* factory, const std::wstring& path, Animation& outpu
     }
     for (UINT i = 0; i < count; ++i)
     {
+        Cancel(cancelled);
         ComPtr<IWICBitmapFrameDecode> frame;
         Check(decoder->GetFrame(i, &frame));
         ComPtr<IWICMetadataQueryReader> metadata;
         Check(frame->GetMetadataQueryReader(&metadata));
         Rect r;
         Bytes pixels = Pixels(factory, frame.Get(), r.w, r.h);
+        Cancel(cancelled);
         r.x = Metadata(metadata.Get(), L"/imgdesc/Left");
         r.y = Metadata(metadata.Get(), L"/imgdesc/Top");
         r.dispose = BYTE(Metadata(metadata.Get(), L"/grctlext/Disposal"));
@@ -159,14 +269,20 @@ void Gif(IWICImagingFactory* factory, const std::wstring& path, Animation& outpu
         Bytes previous;
         if (r.dispose == 3) previous = canvas;
         Composite(canvas, w, pixels, r);
-        Save(factory, output, canvas, w, h);
+        Save(factory, output, canvas, w, h, cancelled);
         // GIF delays are hundredths of a second. Missing metadata defaults to 100 ms.
         output.delays.push_back((std::max)(UINT(USER_TIMER_MINIMUM), Metadata(metadata.Get(), L"/grctlext/Delay", 10) * 10));
+        if (output.frames.size() == 1 && firstFrame)
+        {
+            MakePreview(factory, output, canvas, w, h, cancelled);
+            firstFrame(output);
+        }
         if (r.dispose == 2) Clear(canvas, w, r, clearColor);
         else if (r.dispose == 3) canvas.swap(previous);
     }
 }
-void Apng(IWICImagingFactory* factory, const Bytes& file, Animation& output)
+void Apng(IWICImagingFactory* factory, const Bytes& file, Animation& output, const std::function<bool()>& cancelled,
+    const std::function<void(const Animation&)>& firstFrame)
 {
     Bytes header, shared, compressed, canvas;
     UINT w = 0, h = 0, expected = 0;
@@ -176,6 +292,7 @@ void Apng(IWICImagingFactory* factory, const Bytes& file, Animation& output)
     UINT delay = 100;
     auto finish = [&]()
     {
+        Cancel(cancelled);
         Require(controlled && !compressed.empty(), "APNG frame has no image data");
         Bytes png(file.begin(), file.begin() + 8), ihdr(header);
         for (int i = 0; i < 4; ++i) { ihdr[i] = BYTE(r.w >> (24 - i * 8)); ihdr[i + 4] = BYTE(r.h >> (24 - i * 8)); }
@@ -196,20 +313,26 @@ void Apng(IWICImagingFactory* factory, const Bytes& file, Animation& output)
         Bytes previous;
         if (r.dispose == 2) previous = canvas;
         Composite(canvas, w, pixels, r);
-        Save(factory, output, canvas, w, h);
+        Save(factory, output, canvas, w, h, cancelled);
         output.delays.push_back(delay);
+        if (output.frames.size() == 1 && firstFrame)
+        {
+            MakePreview(factory, output, canvas, w, h, cancelled);
+            firstFrame(output);
+        }
         if (r.dispose == 1) Clear(canvas, w, r);
         else if (r.dispose == 2) canvas.swap(previous);
         compressed.clear();
     };
     for (size_t pos = 8; pos < file.size();)
     {
+        Cancel(cancelled);
         Require(file.size() - pos >= 12, "Truncated PNG chunk");
         uint32_t n = Read32(file.data() + pos);
         Require(n <= file.size() - pos - 12, "Invalid PNG chunk size");
         const BYTE* type = file.data() + pos + 4;
         const BYTE* p = type + 4;
-        Require(Crc(type, size_t(n) + 4) == Read32(p + n), "PNG checksum mismatch");
+        Require(Crc(type, size_t(n) + 4, cancelled) == Read32(p + n), "PNG checksum mismatch");
         auto is = [&](const char* s) { return std::memcmp(type, s, 4) == 0; };
         if (pos == 8) Require(is("IHDR"), "PNG missing IHDR");
         if (is("IHDR"))
@@ -221,6 +344,7 @@ void Apng(IWICImagingFactory* factory, const Bytes& file, Animation& output)
         {
             Require(!actl && !idat && n == 8, "Invalid APNG animation control");
             expected = Read32(p); Require(expected && expected <= MaxFrames, "Invalid APNG frame count"); actl = true;
+            Require(uint64_t(canvas.size()) * expected <= MaxOutputBytes, "Animation exceeds extraction limits (1 GiB decoded pixels)");
         }
         else if (is("fcTL"))
         {
@@ -271,12 +395,15 @@ void Apng(IWICImagingFactory* factory, const Bytes& file, Animation& output)
 
 Animation::~Animation()
 {
+    if (!preview.empty()) DeleteFileW(preview.c_str());
     for (const auto& path : frames) DeleteFileW(path.c_str());
     if (!directory.empty()) RemoveDirectoryW(directory.c_str());
 }
 
-void ExtractAnimation(const std::wstring& path, Animation& output)
+void ExtractAnimation(const std::wstring& path, Animation& output, const std::function<bool()>& cancelled,
+    const std::function<void(const Animation&)>& firstFrame)
 {
+    Cancel(cancelled);
     Require(output.directory.empty() && output.frames.empty(), "Extraction destination is already in use");
     ComScope com;
     ComPtr<IWICImagingFactory> factory;
@@ -285,9 +412,23 @@ void ExtractAnimation(const std::wstring& path, Animation& output)
     Require(bool(input), "Cannot open animation file");
     const auto length = input.tellg();
     Require(length >= 8 && length <= 256 * 1024 * 1024, "Invalid or excessive animation file size (maximum 256 MiB)");
-    Bytes bytes(static_cast<size_t>(length));
-    input.seekg(0); input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    Bytes bytes(8);
+    input.seekg(0); input.read(reinterpret_cast<char*>(bytes.data()), 8);
     Require(bool(input), "Cannot read animation file");
+    const bool gif = std::memcmp(bytes.data(), "GIF87a", 6) == 0 || std::memcmp(bytes.data(), "GIF89a", 6) == 0;
+    if (!gif)
+    {
+        bytes.resize(static_cast<size_t>(length));
+        for (size_t pos = 8; pos < bytes.size();)
+        {
+            Cancel(cancelled);
+            const size_t count = (std::min)(size_t(1024 * 1024), bytes.size() - pos);
+            input.read(reinterpret_cast<char*>(bytes.data() + pos), static_cast<std::streamsize>(count));
+            Require(bool(input), "Cannot read animation file");
+            pos += count;
+        }
+    }
+    Cancel(cancelled);
     wchar_t temp[MAX_PATH + 1]{};
     const DWORD tempLength = GetTempPathW(MAX_PATH + 1, temp);
     Require(tempLength && tempLength < MAX_PATH - 50, "Cannot locate temporary directory");
@@ -297,11 +438,12 @@ void ExtractAnimation(const std::wstring& path, Animation& output)
     const std::wstring directory = std::wstring(temp) + L"Rainmeter-Animate-" + guid;
     Require(CreateDirectoryW(directory.c_str(), nullptr) != FALSE, "Cannot create frame directory");
     output.directory = directory;
-    if (std::memcmp(bytes.data(), "GIF87a", 6) == 0 || std::memcmp(bytes.data(), "GIF89a", 6) == 0) Gif(factory.Get(), path, output);
+    if (gif) Gif(factory.Get(), path, output, cancelled, firstFrame);
     else
     {
         const BYTE signature[] = {137, 80, 78, 71, 13, 10, 26, 10};
         Require(std::memcmp(bytes.data(), signature, 8) == 0, "Input must be GIF or animated PNG");
-        Apng(factory.Get(), bytes, output);
+        Apng(factory.Get(), bytes, output, cancelled, firstFrame);
     }
+    Cancel(cancelled);
 }

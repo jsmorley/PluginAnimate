@@ -22,7 +22,7 @@
     <ResourceCompile Include="PluginAnimate.rc" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="PluginAnimate.cpp" /><ClCompile Include="Animation.cpp" />
+    <ClCompile Include="PluginAnimate.cpp" /><ClCompile Include="Animation.cpp" /><ClCompile Include="AsyncLoader.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{1E69A3BD-16BC-4ACA-870E-219C185B1137}</ProjectGuid>

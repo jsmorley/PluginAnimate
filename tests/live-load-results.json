@@ -1,0 +1,11 @@
+{
+  "File": "A.gif",
+  "DurationSeconds": 20.0419553,
+  "SuccessfulUiResponses": 178,
+  "UiTimeouts": 0,
+  "MaximumUiResponseMilliseconds": 17.6302,
+  "AverageUiResponseMilliseconds": 2.266579213483146,
+  "PreviewObserved": true,
+  "FramesExtracted": 235,
+  "PreviewDiscarded": true
+}

@@ -27,6 +27,7 @@ Options:
 | --- | --- | --- |
 | `ImageName` | Path and filename of GIF or APNG (including APNG with `.png` extension). Relative paths resolve against the skin directory. | Empty |
 | `MeterName` | Section name of the existing Image meter in the same skin. | Empty |
+| `DisplayLoading` | `0` shows the plain first frame while loading; `1` shows a preview with centered Loading... text. | `0` |
 | `Speed` | `0` uses each frame's embedded duration. Positive values override all frame durations in milliseconds, clamped to 10–2147483647 ms. | `0` |
 | `Loop` | Additional repeats after the first play-through: `0` plays once, `1` plays twice, `-1` repeats endlessly. Overrides embedded loop counts. | `0` |
 
@@ -34,7 +35,8 @@ The measure's **numeric value is the effective frame delay in milliseconds**.
 For a positive Speed it returns that fixed duration. With `Speed=0`, it returns
 the current frame's embedded duration, including the documented minimum and
 rounding. Pausing retains the current frame's duration; ending reports the
-first frame's duration. It returns `0` when no source has loaded successfully.
+first frame's duration. While loading, it reports the preview frame's delay
+once available, or `0` before the preview exists or if loading fails.
 The maximum value is the fixed duration when overridden, or the largest embedded
 duration in the loaded animation when using source timing.
 
@@ -65,7 +67,20 @@ completion; use `Start` to start over in those states.
 frame update, resets the repeat count, and displays frame 0. It wakes the worker
 without waiting for the current frame delay, even with a long Speed interval.
 Natural completion leaves the last frame displayed.
-Loading a source initially displays frame 0, but does not start a timer.
+Loading a source happens asynchronously. As soon as the first frame is decoded,
+the Image meter displays it while the remaining frames are extracted.
+With `DisplayLoading=1`, it displays a separate `loading.png` preview with **Loading...**
+superimposed in small, normal-weight text over a compact translucent dark panel
+in the center. This annotation is
+drawn into the preview PNG by the plugin; no extra String meter is required.
+`DisplayLoading=0` is the default and uses the plain first frame,
+avoiding a flicker of Loading... on small animations. The option can be changed
+dynamically without restarting extraction. The actual animation frames remain
+unmodified. When extraction completes, playback uses those frames and the
+annotated preview is deleted in the background. `Start` received while loading remembers the request and starts
+playback when the frames are ready. `Pause` toggles that pending playback
+request, and `End` cancels it; extraction may continue in the background so
+the frames remain available for a later `Start`.
 
 ## Embedded frame timing (`Speed=0`)
 
@@ -102,7 +117,23 @@ Playback runs on a per-measure worker thread, independent of skin Update.
 It advances the playback position using a steady clock and sleeps between
 frame deadlines. While paused, stopped, or finished, it waits indefinitely
 without polling. Commands and dynamic options wake it through a condition
-variable. Finalization wakes and joins the worker before deleting its files.
+variable. Finalization wakes and joins this playback worker promptly.
+
+Extraction and temporary-file deletion run on a separate background worker at
+below-normal thread priority. `Reload` queues a source request and returns
+without reading or decoding the animation. The extraction worker never holds
+the playback/UI mutex while decoding or writing PNGs. Changing sources cancels
+the old request; stale results and errors are discarded. Codec operations,
+frame processing, PNG writing, and APNG parsing have cancellation checkpoints.
+GIF frame metadata is read on demand, and oversized animations are rejected
+before writing their frame files.
+
+Closing or refreshing the skin cancels extraction and queues cleanup without
+waiting on the UI thread. The background worker retains the DLL until it has
+finished cancelling and deleting temporary files, so unloading the measure is
+safe even if a codec operation is still finishing. Only UI messages transfer a
+completed extraction or error back to Rainmeter; all Rainmeter API calls remain
+on the UI thread. Each measure has at most one extraction in progress.
 
 The worker posts a message to the UI thread to send `!SetOption "MeterName"
 ImageName "frame.png"`, `!UpdateMeter`, and `!Redraw`. All Rainmeter API calls
@@ -110,7 +141,7 @@ stay on its UI thread. If a skin update blocks the UI, playback timing continues
 on the worker; at most one display message is queued, and the Image meter shows
 the latest frame when the UI is available. Rendering itself must wait for the
 UI thread, so frames may be skipped visually during a long skin update.
-Images are decoded once during reload, and Rainmeter loads the extracted PNGs
+Images are decoded once in the background, and Rainmeter loads the extracted PNGs
 for display. Large images or very short intervals can increase display work.
 
 Every measure has a unique `%TEMP%\Rainmeter-Animate-{GUID}` folder, where
@@ -122,12 +153,28 @@ Every measure has a unique `%TEMP%\Rainmeter-Animate-{GUID}` folder, where
 %TEMP%\Rainmeter-Animate-{GUID}\frame-0.png
 ```
 
+`loading.png` is the separate annotated first-frame preview in that same
+directory. It is discarded as soon as the full animation is ready.
+
 These are full-canvas PNG frames, including those extracted from APNG sources.
 Each plugin measure owns a separate folder, even when measures use the same
 source. Changing the source deletes its old frames. Closing, unloading, or refreshing the skin calls
-`Finalize`, which stops the worker and deletes its extracted frames and folder.
+`Finalize`, which stops playback, cancels extraction, and schedules deletion of
+its extracted frames and folder on the background worker. Cleanup finishes
+after the current codec operation reaches a cancellation checkpoint; the UI
+does not wait for it.
 Failed extractions also clean up their partial output. Only files created by
 this instance are deleted; cleanup does not recursively traverse directories.
+
+Large-file regression check (November 1, 2026): a 715 × 584 pixel `A.gif` with
+235 frames produced its annotated preview in roughly **140–215 ms** in the
+native x64/x32 test harness. Extraction continued in the
+background. A separate **20-second test in running Rainmeter** observed the
+preview, all 235 extracted frames, and deletion of the preview after loading.
+Rainmeter answered **178 UI responsiveness probes with no timeouts**; the
+slowest response was **17.63 ms**. Other skins remained running. These are
+observations on the development machine, not timing guarantees. Raw live-test
+results are in [tests/live-load-results.json](tests/live-load-results.json).
 
 GIF transparency, offsets, and disposal are composited into full-canvas PNGs.
 APNG additionally supports SOURCE/OVER blending, BACKGROUND/PREVIOUS disposal,

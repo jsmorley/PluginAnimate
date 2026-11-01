@@ -1,6 +1,7 @@
 #include <Windows.h>
 #include "../../API/RainmeterAPI.h"
 #include "Animation.h"
+#include "AsyncLoader.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -17,6 +18,7 @@
 namespace
 {
 constexpr UINT FrameMessage = WM_APP + 1;
+constexpr UINT LoadMessage = WM_APP + 2;
 struct Measure
 {
     void* rm = nullptr;
@@ -36,7 +38,13 @@ struct Measure
     bool shutdown = false;
     bool pending = false;
     bool paused = false;
-    std::wstring source, meter;
+    bool loading = false;
+    bool startWhenReady = false;
+    bool displayLoading = false;
+    UINT_PTR loadRevision = 0;
+    std::shared_ptr<AsyncLoader> loader;
+    std::wstring source, meter, preview, originalPreview;
+    UINT previewDelay = 0;
     std::unique_ptr<Animation> animation;
 
     void StopPlayback()
@@ -53,11 +61,12 @@ struct Measure
             std::lock_guard<std::mutex> lock(mutex);
             StopPlayback();
             shutdown = true;
+            if (loader) loader->Stop(std::move(animation));
             condition.notify_all();
         }
         if (worker.joinable()) worker.join();
         if (window) DestroyWindow(window);
-        // Animation's destructor removes the extracted files and the private folder.
+        // The extraction worker cancels and cleans up independently; never join it here.
     }
     void StartPlayback()
     {
@@ -71,12 +80,39 @@ struct Measure
         std::wstring command;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            if (!animation || animation->frames.empty() || meter.empty()) return;
-            command = L"[!SetOption \"" + meter + L"\" ImageName \"" + animation->frames[index] +
-                L"\"][!UpdateMeter \"" + meter + L"\"][!Redraw]";
+            const std::wstring image = animation ? animation->frames[index] : (displayLoading ? preview : originalPreview);
+            if (!image.empty() && !meter.empty())
+                command = L"[!SetOption \"" + meter + L"\" ImageName \"" + image + L"\"][!UpdateMeter \"" + meter + L"\"]";
+            if (command.empty()) return;
+            command += L"[!Redraw]";
         }
         // Execute last: meter actions can refresh/unload this measure during RmExecute.
         RmExecute(skin, command.c_str());
+    }
+    void Loaded(UINT_PTR revision, LPARAM stage)
+    {
+        std::wstring error;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!loader || revision != loadRevision) return;
+            if (stage == 1)
+            {
+                if (!loader->Preview(revision, preview, originalPreview, previewDelay)) return;
+            }
+            else if (stage == 0)
+            {
+                if (!loader->Take(revision, animation, error)) return;
+                loading = false;
+                preview.clear();
+                originalPreview.clear();
+                if (animation) loader->DiscardPreview(std::move(animation->preview));
+                if (animation && startWhenReady && !meter.empty()) StartPlayback();
+                if (!animation) paused = false;
+                startWhenReady = false;
+            }
+        }
+        if (!error.empty()) RmLog(rm, LOG_ERROR, error.c_str());
+        Show();
     }
     void Run()
     {
@@ -112,6 +148,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
     }
     auto measure = reinterpret_cast<Measure*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == LoadMessage && measure)
+    {
+        measure->Loaded(wParam, lParam);
+        return 0;
+    }
     if (message == FrameMessage && measure)
     {
         bool show = false;
@@ -160,10 +201,14 @@ PLUGIN_EXPORT void Initialize(void** data, void* rm)
     if (!measure->window) RmLog(rm, LOG_ERROR, L"Animate: Cannot create display message window.");
     else
     {
-        try { measure->worker = std::thread(&Measure::Run, measure.get()); }
+        try
+        {
+            measure->loader = AsyncLoader::Create(measure->window, LoadMessage);
+            measure->worker = std::thread(&Measure::Run, measure.get());
+        }
         catch (const std::exception&)
         {
-            RmLog(rm, LOG_ERROR, L"Animate: Cannot create playback thread.");
+            RmLog(rm, LOG_ERROR, L"Animate: Cannot create background workers.");
         }
     }
     *data = measure.release();
@@ -177,6 +222,7 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
     std::wstring raw = RmReadString(rm, L"ImageName", L"");
     std::wstring source = raw.empty() ? L"" : RmPathToAbsolute(rm, raw.c_str());
     std::wstring meter = RmReadString(rm, L"MeterName", L"");
+    const bool displayLoading = RmReadDouble(rm, L"DisplayLoading", 0) != 0;
     double speedValue = RmReadDouble(rm, L"Speed", 0);
     double loopValue = RmReadDouble(rm, L"Loop", 0);
     UINT speed = speedValue == 0.0 ? 0 : (std::isfinite(speedValue) ? static_cast<UINT>((std::clamp)(speedValue, double(USER_TIMER_MINIMUM), double(USER_TIMER_MAXIMUM))) : 0);
@@ -189,36 +235,22 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
     const bool wasPlaying = m.playing;
     const bool sourceChanged = source != m.source;
     const bool speedChanged = speed != m.speed;
-    show = meter != m.meter;
+    show = meter != m.meter || displayLoading != m.displayLoading;
+    m.displayLoading = displayLoading;
     m.meter = std::move(meter); m.speed = speed; m.loop = loop;
     if (sourceChanged)
     {
         m.StopPlayback();
-        m.animation.reset(); // Clean old source even if replacement extraction fails.
+        m.startWhenReady = (wasPlaying || m.startWhenReady) && !source.empty();
         m.source = std::move(source);
         m.index = 0; m.repeats = 0; m.completed = false;
-    }
-    if (!m.source.empty() && sourceChanged)
-    {
-        try
-        {
-            auto animation = std::make_unique<Animation>();
-            ExtractAnimation(m.source, *animation);
-            for (const auto& path : animation->frames)
-                if (!SafeArgument(path)) throw std::runtime_error("Temporary path contains unsupported bang delimiters");
-            m.animation = std::move(animation);
-            show = true;
-        }
-        catch (const std::exception& error)
-        {
-            // Decoder errors are ASCII; source and measure are identified by Rainmeter's log context.
-            const std::string text = error.what();
-            std::wstring message = L"Animate: " + std::wstring(text.begin(), text.end());
-            RmLog(rm, LOG_ERROR, message.c_str());
-        }
+        m.preview.clear();
+        m.originalPreview.clear();
+        if (m.loader) m.loadRevision = m.loader->Request(m.source, std::move(m.animation));
+        m.loading = m.loader && !m.source.empty();
     }
     if (m.meter.empty() || !m.animation) m.StopPlayback();
-    else if (wasPlaying && (sourceChanged || speedChanged)) m.StartPlayback();
+    else if (wasPlaying && speedChanged) m.StartPlayback();
     *maxValue = m.animation ? double(m.speed ? m.speed : *std::max_element(m.animation->delays.begin(), m.animation->delays.end())) : 0.0;
     lock.unlock();
     if (show) m.Show();
@@ -228,7 +260,8 @@ PLUGIN_EXPORT double Update(void* data)
 {
     auto& m = *static_cast<Measure*>(data);
     std::lock_guard<std::mutex> lock(m.mutex);
-    return m.animation ? double(m.speed ? m.speed : m.animation->delays[m.index]) : 0.0;
+    if (m.animation) return double(m.speed ? m.speed : m.animation->delays[m.index]);
+    return m.preview.empty() ? 0.0 : double(m.speed ? m.speed : m.previewDelay);
 }
 
 PLUGIN_EXPORT LPCWSTR GetString(void* data)
@@ -243,15 +276,22 @@ PLUGIN_EXPORT void ExecuteBang(void* data, LPCWSTR args)
     std::unique_lock<std::mutex> lock(m.mutex);
     if (_wcsicmp(args, L"start") == 0)
     {
-        if (!m.worker.joinable() || !m.animation || m.meter.empty()) return;
+        if (!m.worker.joinable() || m.meter.empty()) return;
         m.index = 0; m.repeats = 0; m.completed = false; m.paused = false;
+        if (m.loading) { m.StopPlayback(); m.startWhenReady = true; return; }
+        if (!m.animation) return;
         m.StartPlayback();
         lock.unlock();
         m.Show();
     }
     else if (_wcsicmp(args, L"pause") == 0)
     {
-        if (m.playing)
+        if (m.loading)
+        {
+            if (m.startWhenReady) { m.startWhenReady = false; m.paused = true; }
+            else if (m.paused) { m.startWhenReady = true; m.paused = false; }
+        }
+        else if (m.playing)
         {
             m.StopPlayback();
             m.paused = true;
@@ -267,6 +307,7 @@ PLUGIN_EXPORT void ExecuteBang(void* data, LPCWSTR args)
     else if (_wcsicmp(args, L"end") == 0)
     {
         m.StopPlayback(); m.index = 0; m.repeats = 0; m.completed = false; m.paused = false;
+        m.startWhenReady = false;
         lock.unlock();
         m.Show();
     }

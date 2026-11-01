@@ -47,9 +47,9 @@ void Pump(DWORD milliseconds)
         Sleep(1);
     }
 }
-template<typename Predicate> void Until(Predicate ready, const char* message)
+template<typename Predicate> void Until(Predicate ready, const char* message, DWORD timeout = 3000)
 {
-    const auto deadline = GetTickCount64() + 3000;
+    const auto deadline = GetTickCount64() + timeout;
     while (!ready() && GetTickCount64() < deadline) Pump(5);
     Assert(ready(), message);
 }
@@ -120,12 +120,52 @@ int wmain(int argc, wchar_t** argv)
             Assert(rejected, "Reject corrupted PNG");
         }
         Assert(!std::filesystem::exists(badDir), "Failed extraction cleans partial files");
+        {
+            Animation previewed;
+            bool shown = false;
+            std::vector<BYTE> original;
+            ExtractAnimation(L"examples/Animate/@Resources/Loading.gif", previewed, {}, [&](const Animation& first) {
+                Assert(first.frames.size() == 1 && !first.preview.empty(), "Preview is published with only the first frame extracted");
+                original = ReadPixels(first.frames[0]);
+                const auto annotated = ReadPixels(first.preview);
+                Assert(original != annotated && std::equal(original.begin(), original.begin() + 4, annotated.begin()),
+                    "Loading text changes only the separate preview and preserves surrounding transparency");
+                bool whiteText = false;
+                for (size_t pixel = 0; pixel < annotated.size(); pixel += 4)
+                    if (annotated[pixel] == 255 && annotated[pixel + 1] == 255 && annotated[pixel + 2] == 255) whiteText = true;
+                Assert(whiteText, "Preview contains rendered white loading text");
+                shown = true;
+            });
+            Assert(shown && ReadPixels(previewed.frames[0]) == original, "Real first animation frame is never annotated");
+        }
+        {
+            std::wstring cancelledDir;
+            bool cancelled = false;
+            {
+                Animation partial;
+                try { ExtractAnimation(fixture(L"blend.apng"), partial, [&] { return !partial.frames.empty(); }); }
+                catch (const AnimationCancelled&) { cancelled = true; }
+                cancelledDir = partial.directory;
+            }
+            Assert(cancelled && !std::filesystem::exists(cancelledDir), "Cancelled extraction removes partial PNG output");
+        }
 
         options = {{L"ImageName",fixture(L"blend.apng")},{L"MeterName",L"Image"},{L"Speed",L"20"},{L"Loop",L"0"}};
         void* data = nullptr; double maximum = 0;
         Initialize(&data, &options);
         auto* m = static_cast<Measure*>(data);
+        const auto reloadStarted = GetTickCount64();
+        options[L"ImageName"] = fixture(L"bad.apng");
         Reload(data, &options, &maximum);
+        ExecuteBang(data, L"start");
+        options[L"ImageName"] = fixture(L"blend.apng");
+        Reload(data, &options, &maximum);
+        ExecuteBang(data, L"end");
+        Assert(GetTickCount64() - reloadStarted < 500 && m->loading && !m->animation, "Reload queues extraction without blocking");
+        Assert(Update(data) == 0, "Numeric value is zero while loading");
+        Assert(!m->displayLoading, "DisplayLoading defaults to zero");
+        Until([&] { return !m->loading; }, "Background extraction completes");
+        Reload(data, &options, &maximum); // Refresh the host's maximum after loading.
         Assert(m->animation && maximum == 20 && Update(data) == 20, "Measure returns fixed effective duration");
         Assert(std::wstring(GetString(data)) == fixture(L"blend.apng"), "String value returns full source path");
         auto oldDir = m->animation->directory;
@@ -233,15 +273,107 @@ int wmain(int argc, wchar_t** argv)
         options[L"Speed"] = L"50";
         options[L"MeterName"] = L"OtherImage";
         Reload(data, &options, &maximum);
-        Assert(m->playing && m->index == 0 && m->speed == 50, "Dynamic source/speed preserves running state");
+        Assert(m->loading && m->startWhenReady && m->speed == 50, "Dynamic source/speed queues background load and preserves requested running state");
+        Until([&] { return !m->loading; }, "Replacement source loads");
+        Assert(m->animation && m->playing, "Replacement resumes requested playback");
         Assert(!std::filesystem::exists(oldDir), "Source replacement removes old folder");
         Assert(std::wstring(GetString(data)) == fixture(L"disposal.gif"), "Dynamic source changes string value");
         Assert(commands.back().find(L"[!UpdateMeter \"OtherImage\"]") != std::wstring::npos, "Targets normal image meter");
         auto finalDir = m->animation->directory;
+        std::weak_ptr<AsyncLoader> cleanup = m->loader;
         Finalize(data);
+        Until([&] { return cleanup.expired(); }, "Background cleanup completes");
         Assert(!std::filesystem::exists(finalDir), "Finalize removes temporary folder");
         Pump(60); // Pending timer messages after finalization must be harmless.
         Assert(errors.empty(), "No unexpected plugin errors");
+        if (argc == 3 && std::wstring(argv[1]) == L"--large")
+        {
+            options = {{L"ImageName",argv[2]},{L"MeterName",L"LargeImage"},{L"Loop",L"-1"},{L"DisplayLoading",L"1"}};
+            Initialize(&data, &options);
+            m = static_cast<Measure*>(data);
+            const auto began = GetTickCount64();
+            const auto beganPrecise = std::chrono::steady_clock::now();
+            Reload(data, &options, &maximum);
+            const auto reloadMs = GetTickCount64() - began;
+            const auto reloadPreciseMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - beganPrecise).count();
+            Assert(reloadMs < 500 && m->loading, "Large GIF Reload returns immediately");
+            ExecuteBang(data, L"start");
+            ExecuteBang(data, L"pause");
+            Assert(m->paused && !m->startWhenReady, "Pause during loading cancels deferred start");
+            ExecuteBang(data, L"pause");
+            Assert(m->startWhenReady, "Pause toggle during loading resumes deferred start");
+            ExecuteBang(data, L"end");
+            Assert(!m->startWhenReady && !m->paused, "End during loading cancels deferred playback");
+            ExecuteBang(data, L"start");
+            size_t heartbeats = 0;
+            ULONGLONG maxUiMs = reloadMs;
+            double maxPreciseUiMs = reloadPreciseMs;
+            double previewMs = -1;
+            std::wstring previewPath;
+            while (m->loading && GetTickCount64() - began < 120000)
+            {
+                const auto call = GetTickCount64();
+                const auto callPrecise = std::chrono::steady_clock::now();
+                Update(data);
+                GetString(data);
+                maxUiMs = (std::max)(maxUiMs, GetTickCount64() - call);
+                maxPreciseUiMs = (std::max)(maxPreciseUiMs,
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - callPrecise).count());
+                ++heartbeats;
+                Pump(5);
+                if (previewMs < 0 && !m->preview.empty())
+                {
+                    previewMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - beganPrecise).count();
+                    previewPath = m->preview;
+                    Assert(std::filesystem::path(previewPath).filename() == L"loading.png", "Early frame is the separate loading preview");
+                    const auto copy = sizeof(void*) == 8 ? L"tests/x64/Release/loading-preview.png" : L"tests/x32/Release/loading-preview.png";
+                    Assert(CopyFileW(previewPath.c_str(), copy, FALSE) != FALSE, "Capture loading preview for visual verification");
+                    Assert(commands.back().find(L"loading.png") != std::wstring::npos, "DisplayLoading=1 displays the annotated preview");
+                    const auto request = m->loadRevision;
+                    options[L"DisplayLoading"] = L"0";
+                    Reload(data, &options, &maximum);
+                    Assert(m->loadRevision == request && m->loading && commands.back().find(L"frame-0.png") != std::wstring::npos,
+                        "DisplayLoading=0 switches to the plain first frame without restarting extraction");
+                    options[L"DisplayLoading"] = L"1";
+                    Reload(data, &options, &maximum);
+                    Assert(m->loadRevision == request && commands.back().find(L"loading.png") != std::wstring::npos,
+                        "DisplayLoading can be re-enabled during extraction");
+                }
+            }
+            Assert(!m->loading && m->animation && m->playing, "Large GIF completes and honors deferred Start");
+            Assert(heartbeats > 0 && maxUiMs < 500, "UI remains responsive throughout large extraction");
+            Assert(previewMs >= 0 && previewMs < GetTickCount64() - began, "Annotated preview arrives before extraction completes");
+            Until([&] { return !std::filesystem::exists(previewPath); }, "Loading preview is deleted after switching to real frames");
+            std::cout << "Large GIF: " << m->animation->frames.size() << " frames; load " << GetTickCount64() - began
+                << " ms; preview " << previewMs << " ms; Reload " << reloadPreciseMs << " ms; max UI call " << maxPreciseUiMs << " ms; " << heartbeats << " UI heartbeats\n";
+            ExecuteBang(data, L"end");
+            // Start another large extraction, then supersede it with a small source.
+            options[L"ImageName"] = L"";
+            Reload(data, &options, &maximum);
+            options[L"ImageName"] = argv[2];
+            Reload(data, &options, &maximum);
+            ExecuteBang(data, L"start");
+            Sleep(30);
+            options[L"ImageName"] = fixture(L"disposal.gif");
+            const auto switchBegan = GetTickCount64();
+            Reload(data, &options, &maximum);
+            Assert(GetTickCount64() - switchBegan < 500, "Source replacement does not wait for old extraction or deletion");
+            ExecuteBang(data, L"end");
+            Until([&] { return !m->loading; }, "Cancelled source is replaced", 30000);
+            Assert(m->animation && m->animation->frames.size() == 4 && !m->playing,
+                "Latest source wins and End prevents deferred autoplay");
+            options[L"ImageName"] = argv[2];
+            Reload(data, &options, &maximum);
+            Sleep(30);
+            cleanup = m->loader;
+            const auto closeBegan = GetTickCount64();
+            Finalize(data);
+            const auto closeMs = GetTickCount64() - closeBegan;
+            Assert(closeMs < 500, "Finalize does not wait for extraction or cleanup");
+            Until([&] { return cleanup.expired(); }, "Cancelled load cleans up after unload", 30000);
+            Assert(errors.empty(), "No unexpected large-file errors");
+            std::cout << "Large GIF: source-change cancellation and unload cleanup passed; Finalize " << closeMs << " ms\n";
+        }
         CoUninitialize();
         std::cout << "PASS: GIF/APNG pixels, transparency, disposal, poster exclusion, corruption, timers, pause/resume, loops, reload, cleanup\n";
         return 0;

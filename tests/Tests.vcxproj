@@ -22,7 +22,7 @@
 
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Tests.cpp" /><ClCompile Include="..\Animation.cpp" />
+    <ClCompile Include="Tests.cpp" /><ClCompile Include="..\Animation.cpp" /><ClCompile Include="..\AsyncLoader.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{BB7D8B43-68CE-493D-B516-0497F95C42F6}</ProjectGuid>
