@@ -462,6 +462,90 @@ int wmain(int argc, wchar_t** argv)
             "Finalize removes empty skin Temp and retains @Resources");
         Pump(60); // Pending timer messages after finalization must be harmless.
         Assert(errors.empty(), "No unexpected plugin errors");
+        // Weather skins can issue Start on refresh before WebParser supplies an
+        // icon code, temporarily leaving an empty or extension-only filename.
+        for (const auto& invalid : {std::wstring(), (testSkin.resources / L".webp").wstring(), fixture(L"bad.apng")})
+        {
+            options = {{L"ImageName", invalid},{L"MeterName",L"WeatherImage"},{L"Loop",L"-1"}};
+            Initialize(&data, &options);
+            m = static_cast<Measure*>(data);
+            Reload(data, &options, &maximum);
+            ExecuteBang(data, L"start");
+            Until([&] { return !m->loading; }, "Invalid weather source completes its load attempt");
+            Assert(errors.size() == 1 && !m->playing && m->startWhenReady, "Refresh Start logs one error and waits for a valid icon");
+            Assert(commands.back().find(L"ImageName \"\"") != std::wstring::npos, "Failed load clears stale Image meter paths");
+            const auto revision = m->loadRevision;
+            const auto failedCommands = commands.size();
+            for (int i = 0; i < 50; ++i) { Reload(data, &options, &maximum); Update(data); Pump(1); }
+            Assert(errors.size() == 1 && m->loadRevision == revision && commands.size() == failedCommands,
+                "Skin updates neither retry an invalid source nor repeat errors or image bangs");
+            ExecuteBang(data, L"StArT");
+            ExecuteBang(data, L"start");
+            Until([&] { return !m->loading; }, "Explicit Start retries finish");
+            Assert(errors.size() == 3, "Exactly one source error for each explicit Start, including queued Starts");
+            ExecuteBang(data, L"end");
+            options[L"ImageName"] = fixture(L"blend.webp");
+            Reload(data, &options, &maximum);
+            Until([&] { return !m->loading; }, "Valid replacement after End loads");
+            Assert(m->animation && !m->playing && errors.size() == 3, "End cancels waiting playback");
+            ExecuteBang(data, L"start");
+            options[L"ImageName"] = invalid.empty() ? L"" : (testSkin.resources / L".webp").wstring();
+            Reload(data, &options, &maximum);
+            Until([&] { return !m->loading; }, "Failed dynamic replacement loads silently");
+            Assert(errors.size() == 3 && m->startWhenReady && commands.back().find(L"ImageName \"\"") != std::wstring::npos,
+                "Dynamic invalid source stays quiet and clears deleted frame paths");
+            options[L"ImageName"] = fixture(L"blend.webp");
+            Reload(data, &options, &maximum);
+            Until([&] { return !m->loading; }, "WeatherParser valid icon loads");
+            Assert(m->animation && m->playing && errors.size() == 3, "Original playback request resumes when WebParser supplies a valid source");
+            cleanup = m->loader;
+            Finalize(data);
+            Until([&] { return cleanup.expired(); }, "Failed-source test cleanup completes");
+            errors.clear();
+        }
+        {
+            const auto repair = (testSkin.resources / L"repaired.webp").wstring();
+            options = {{L"ImageName",repair},{L"MeterName",L"WeatherImage"},{L"Loop",L"-1"}};
+            Initialize(&data, &options);
+            m = static_cast<Measure*>(data);
+            Reload(data, &options, &maximum);
+            Until([&] { return !m->loading; }, "Unstarted failed source finishes silently");
+            Assert(errors.empty(), "Prefetch failure without Start does not log");
+            std::filesystem::copy_file(fixture(L"blend.webp"), repair);
+            ExecuteBang(data, L"start");
+            Until([&] { return !m->loading; }, "Repaired source reloads on Start");
+            Assert(m->animation && m->playing && errors.empty(), "Start retries a repaired filename without a stale error");
+            cleanup = m->loader;
+            Finalize(data);
+            Until([&] { return cleanup.expired(); }, "Repaired-source cleanup completes");
+            std::filesystem::remove(repair);
+        }
+        {
+            options = {{L"ImageName",fixture(L"blend.webp")},{L"MeterName",L"WeatherImage"},{L"Loop",L"-1"},{L"Speed",L"30000"}};
+            Initialize(&data, &options);
+            m = static_cast<Measure*>(data);
+            Reload(data, &options, &maximum);
+            ExecuteBang(data, L"start");
+            Until([&] { return !m->loading; }, "External-deletion test starts playback");
+            const auto temp = testSkin.resources / L"Temp";
+            Assert(temp.parent_path() == testSkin.resources && std::filesystem::exists(temp), "Deletion target is inside the isolated test skin");
+            std::filesystem::remove_all(temp);
+            Assert(Update(data) == 0 && !m->playing && !m->animation && errors.size() == 1,
+                "Skin update detects external deletion without waiting for the 30-second timer");
+            Assert(commands.back().find(L"ImageName \"\"") != std::wstring::npos, "External deletion clears the Image meter");
+            for (int i = 0; i < 50; ++i) { Reload(data, &options, &maximum); Update(data); Pump(1); }
+            Assert(errors.size() == 1 && !m->loading, "Deleted frames do not trigger retries or repeated errors");
+            ExecuteBang(data, L"start");
+            Until([&] { return !m->loading; }, "Start rebuilds externally deleted frames");
+            Assert(m->playing && m->animation && errors.size() == 1, "Rebuild succeeds without a stale error");
+            std::filesystem::remove_all(temp);
+            m->Show();
+            Assert(!m->playing && errors.size() == 2, "Frame presentation also catches external deletion once per Start");
+            cleanup = m->loader;
+            Finalize(data);
+            Until([&] { return cleanup.expired(); }, "External-deletion cleanup completes");
+            errors.clear();
+        }
         if (argc == 3 && std::wstring(argv[1]) == L"--large")
         {
             options = {{L"ImageName",argv[2]},{L"MeterName",L"LargeImage"},{L"Loop",L"-1"},{L"DisplayLoading",L"1"}};

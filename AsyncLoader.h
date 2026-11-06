@@ -15,6 +15,7 @@ public:
     bool Take(UINT_PTR revision, std::unique_ptr<Animation>& result, std::wstring& error);
     bool Preview(UINT_PTR revision, std::wstring& path, std::wstring& original, UINT& delay);
     void DiscardPreview(std::wstring path);
+    void Retire(std::vector<std::unique_ptr<Animation>> animations);
     void Stop(std::unique_ptr<Animation> retired);
 
 private:

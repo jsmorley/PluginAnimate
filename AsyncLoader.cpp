@@ -108,6 +108,13 @@ void AsyncLoader::Stop(std::unique_ptr<Animation> retired)
     condition.notify_one();
 }
 
+void AsyncLoader::Retire(std::vector<std::unique_ptr<Animation>> animations)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    for (auto& animation : animations) garbage.push_back(std::move(animation));
+    condition.notify_one();
+}
+
 void AsyncLoader::Run()
 {
     for (;;)
@@ -154,7 +161,7 @@ void AsyncLoader::Run()
         {
             loaded.reset();
             const std::string text = exception.what();
-            failure = L"Animate: " + std::wstring(text.begin(), text.end());
+            failure = L"Animate: " + std::wstring(text.begin(), text.end()) + L". Source: " + path;
         }
         {
             std::lock_guard<std::mutex> lock(mutex);

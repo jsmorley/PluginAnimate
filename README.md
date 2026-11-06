@@ -87,6 +87,35 @@ playback when the frames are ready. `Pause` pauses that pending playback request
 `PauseResume` toggles it, and `End` cancels it. Extraction may continue in the background so
 the frames remain available for a later `Start`.
 
+Version **1.6.0** stops repeated source-error reporting. A missing, empty,
+invalid, or undecodable animation produces **one error per explicit `Start`**.
+After failure, Animate stops playback and waits: skin updates and playback
+timers do not retry the failed source. A new `Start` retries it once, allowing
+a repaired file at the same path to load. A changed `ImageName` loads the new
+source normally. Background prefetch failures without a `Start` stay silent.
+The Image meter is cleared when changing sources or when extraction fails, so
+it does not keep trying to display deleted temporary frames.
+
+For weather skins, a refresh-time `Start` can arrive before WebParser has an
+icon code, leaving an empty filename or `.webp`. That logs once and preserves
+the playback request. When WebParser supplies a valid path, Animate loads and
+plays it automatically. `End` cancels that pending request.
+
+If extracted frames are deleted externally while the skin is running,
+Animate detects the missing current frame on its next display or measure
+update, stops playback, and clears the Image meter. It reports once for that
+`Start` and waits; a new `Start` rebuilds the frames from the source animation.
+This also works with long frame delays, without waiting for that delay to expire.
+Native Rainmeter validation on November 6, 2026 used 500 skin updates at 10 ms:
+three `Start` commands with an extension-only `.webp` path produced exactly
+three source errors and no Image meter errors, including a valid-to-invalid
+source change. A separate test deleted the active `Temp` folder with a 30-second
+frame delay and produced exactly one error. Both x64 and Win32 regression
+suites also passed retry, recovery, deferred cleanup, and external-deletion
+checks. Results: `tests/missing-source-results.json` and
+`tests/deleted-frames-results.json`; reproduce with `tests/VerifyMissingSource.ps1`
+and its `-DeleteFrames` switch.
+
 ## Embedded frame timing (`Speed=0`)
 
 All three formats store a duration for each frame; durations may vary within a file.
@@ -162,7 +191,7 @@ generated identifier. Animate creates `@Resources` and its `Temp` directory if
 they do not exist. This keeps active animation frames outside Windows Temp,
 where disk-cleaning utilities can remove them during playback.
 The skin's resource directory must be writable; a creation failure is reported
-once for that load in Rainmeter's log, with no fallback to Windows Temp.
+once per explicit `Start` in Rainmeter's log, with no fallback to Windows Temp.
 Extracted frames are named
 `frame-0.bmp`, `frame-1.bmp`, `frame-2.bmp`, and so on. For example:
 

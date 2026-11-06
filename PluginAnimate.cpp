@@ -19,6 +19,7 @@ namespace
 {
 constexpr UINT FrameMessage = WM_APP + 1;
 constexpr UINT LoadMessage = WM_APP + 2;
+constexpr UINT RetireMessage = WM_APP + 3;
 struct Measure
 {
     void* rm = nullptr;
@@ -41,11 +42,14 @@ struct Measure
     bool loading = false;
     bool startWhenReady = false;
     bool displayLoading = false;
+    uint64_t pendingStarts = 0;
+    bool frameErrorAllowed = false;
     UINT_PTR loadRevision = 0;
     std::shared_ptr<AsyncLoader> loader;
     std::wstring source, meter, preview, originalPreview;
     UINT previewDelay = 0;
     std::unique_ptr<Animation> animation;
+    std::vector<std::unique_ptr<Animation>> retired;
 
     void StopPlayback()
     {
@@ -61,7 +65,11 @@ struct Measure
             std::lock_guard<std::mutex> lock(mutex);
             StopPlayback();
             shutdown = true;
-            if (loader) loader->Stop(std::move(animation));
+            if (loader)
+            {
+                loader->Retire(std::move(retired));
+                loader->Stop(std::move(animation));
+            }
             condition.notify_all();
         }
         if (worker.joinable()) worker.join();
@@ -75,23 +83,48 @@ struct Measure
         playing = true;
         condition.notify_all();
     }
+    bool ValidateFrame(std::wstring& error)
+    {
+        if (!animation) return true;
+        const DWORD attributes = GetFileAttributesW(animation->frames[index].c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY)) return true;
+        StopPlayback();
+        retired.push_back(std::move(animation));
+        preview.clear(); originalPreview.clear();
+        loading = false; paused = false; startWhenReady = true;
+        pendingStarts = 0;
+        if (loader) loadRevision = loader->Request(L"", {});
+        if (frameErrorAllowed)
+            error = L"Animate: Extracted frames are missing. Use Start to rebuild them. Source: " + source;
+        frameErrorAllowed = false;
+        return false;
+    }
     void Show()
     {
         std::wstring command;
+        std::wstring error;
         {
             std::lock_guard<std::mutex> lock(mutex);
+            ValidateFrame(error);
             const std::wstring image = animation ? animation->frames[index] : (displayLoading ? preview : originalPreview);
-            if (!image.empty() && !meter.empty())
+            // An empty image actively clears a previous frame. Leaving a deleted
+            // frame path on the meter makes Rainmeter log on every skin update.
+            if (!meter.empty())
                 command = L"[!SetOption \"" + meter + L"\" ImageName \"" + image + L"\"][!UpdateMeter \"" + meter + L"\"]";
             if (command.empty()) return;
             command += L"[!Redraw]";
+            // RmExecute is synchronous. This posted message runs after the meter
+            // has stopped using the old paths, keeping deletion off the UI thread.
+            if (!retired.empty()) PostMessageW(window, RetireMessage, 0, 0);
         }
+        if (!error.empty()) RmLog(rm, LOG_ERROR, error.c_str());
         // Execute last: meter actions can refresh/unload this measure during RmExecute.
         RmExecute(skin, command.c_str());
     }
     void Loaded(UINT_PTR revision, LPARAM stage)
     {
         std::wstring error;
+        uint64_t errorReports = 0;
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (!loader || revision != loadRevision) return;
@@ -102,16 +135,19 @@ struct Measure
             else if (stage == 0)
             {
                 if (!loader->Take(revision, animation, error)) return;
+                if (!error.empty()) { errorReports = pendingStarts; frameErrorAllowed = false; }
+                pendingStarts = 0;
                 loading = false;
                 preview.clear();
                 originalPreview.clear();
                 if (animation) loader->DiscardPreview(std::move(animation->preview));
                 if (animation && startWhenReady && !meter.empty()) StartPlayback();
-                if (!animation) paused = false;
-                startWhenReady = false;
+                // Keep Start pending after a bad weather icon path. A later
+                // WebParser source change can then begin playback automatically.
+                if (animation) startWhenReady = false;
             }
         }
-        if (!error.empty()) RmLog(rm, LOG_ERROR, error.c_str());
+        for (uint64_t i = 0; i < errorReports; ++i) RmLog(rm, LOG_ERROR, error.c_str());
         Show();
     }
     void Run()
@@ -148,6 +184,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
     }
     auto measure = reinterpret_cast<Measure*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == RetireMessage && measure)
+    {
+        std::lock_guard<std::mutex> lock(measure->mutex);
+        if (measure->loader) measure->loader->Retire(std::move(measure->retired));
+        return 0;
+    }
     if (message == LoadMessage && measure)
     {
         measure->Loaded(wParam, lParam);
@@ -242,13 +284,16 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
     m.meter = std::move(meter); m.speed = speed; m.loop = loop;
     if (sourceChanged)
     {
+        show = true;
+        m.pendingStarts = 0;
         m.StopPlayback();
-        m.startWhenReady = (wasPlaying || m.startWhenReady) && !source.empty();
+        m.startWhenReady = wasPlaying || m.startWhenReady;
         m.source = std::move(source);
         m.index = 0; m.repeats = 0; m.completed = false;
         m.preview.clear();
         m.originalPreview.clear();
-        if (m.loader) m.loadRevision = m.loader->Request(m.source, std::move(m.animation));
+        if (m.animation) m.retired.push_back(std::move(m.animation));
+        if (m.loader) m.loadRevision = m.loader->Request(m.source, {});
         m.loading = m.loader && !m.source.empty();
     }
     if (m.meter.empty() || !m.animation) m.StopPlayback();
@@ -261,7 +306,15 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
 PLUGIN_EXPORT double Update(void* data)
 {
     auto& m = *static_cast<Measure*>(data);
-    std::lock_guard<std::mutex> lock(m.mutex);
+    std::unique_lock<std::mutex> lock(m.mutex);
+    std::wstring error;
+    if (!m.ValidateFrame(error))
+    {
+        lock.unlock();
+        if (!error.empty()) RmLog(m.rm, LOG_ERROR, error.c_str());
+        m.Show();
+        return 0.0;
+    }
     if (m.animation) return double(m.speed ? m.speed : m.animation->delays[m.index]);
     return m.preview.empty() ? 0.0 : double(m.speed ? m.speed : m.previewDelay);
 }
@@ -278,10 +331,34 @@ PLUGIN_EXPORT void ExecuteBang(void* data, LPCWSTR args)
     std::unique_lock<std::mutex> lock(m.mutex);
     if (_wcsicmp(args, L"start") == 0)
     {
+        if (m.source.empty())
+        {
+            m.StopPlayback();
+            m.index = 0; m.repeats = 0; m.completed = false; m.paused = false;
+            m.startWhenReady = true;
+            m.frameErrorAllowed = false;
+            lock.unlock();
+            RmLog(m.rm, LOG_ERROR, L"Animate: ImageName is empty.");
+            m.Show();
+            return;
+        }
         if (!m.worker.joinable() || m.meter.empty()) return;
+        m.frameErrorAllowed = true;
         m.index = 0; m.repeats = 0; m.completed = false; m.paused = false;
-        if (m.loading) { m.StopPlayback(); m.startWhenReady = true; return; }
-        if (!m.animation) return;
+        if (m.loading) { ++m.pendingStarts; m.StopPlayback(); m.startWhenReady = true; return; }
+        if (!m.animation)
+        {
+            // Retry only on an explicit Start, so a repaired file can recover
+            // without turning skin updates into repeated loads or log entries.
+            if (m.loader)
+            {
+                m.pendingStarts = 1;
+                m.startWhenReady = true;
+                m.loading = true;
+                m.loadRevision = m.loader->Request(m.source, {});
+            }
+            return;
+        }
         m.StartPlayback();
         lock.unlock();
         m.Show();
@@ -289,7 +366,7 @@ PLUGIN_EXPORT void ExecuteBang(void* data, LPCWSTR args)
     else if (_wcsicmp(args, L"pause") == 0 || _wcsicmp(args, L"pauseresume") == 0)
     {
         const bool toggle = _wcsicmp(args, L"pauseresume") == 0;
-        if (m.loading)
+        if (m.loading || !m.animation)
         {
             if (m.startWhenReady) { m.startWhenReady = false; m.paused = true; }
             else if (toggle && m.paused) { m.startWhenReady = true; m.paused = false; }
@@ -311,6 +388,8 @@ PLUGIN_EXPORT void ExecuteBang(void* data, LPCWSTR args)
     {
         m.StopPlayback(); m.index = 0; m.repeats = 0; m.completed = false; m.paused = false;
         m.startWhenReady = false;
+        m.pendingStarts = 0;
+        m.frameErrorAllowed = false;
         lock.unlock();
         m.Show();
     }
