@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <memory>
 #include <limits>
+#include <mutex>
 #include "third_party/libwebp-1.6.0/src/webp/demux.h"
 
 using Microsoft::WRL::ComPtr;
@@ -18,8 +19,17 @@ namespace
 constexpr size_t MaxPixels = 16 * 1024 * 1024;
 constexpr size_t MaxFrames = 10000;
 constexpr uint64_t MaxOutputBytes = 1024ull * 1024 * 1024;
+// Serialize shared Temp creation/removal across measures and background cleanup.
+std::mutex temporaryDirectoryMutex;
 void Check(HRESULT hr) { if (FAILED(hr)) throw std::runtime_error("Windows image codec operation failed"); }
 void Require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
+void EnsureDirectory(const std::wstring& path)
+{
+    if (CreateDirectoryW(path.c_str(), nullptr)) return;
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    Require(attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY),
+        "Cannot create skin @Resources or Temp directory; check write permissions");
+}
 void Cancel(const std::function<bool()>& cancelled)
 {
     if (cancelled && cancelled()) throw AnimationCancelled();
@@ -475,14 +485,17 @@ Animation::~Animation()
 {
     if (!preview.empty()) DeleteFileW(preview.c_str());
     for (const auto& path : frames) DeleteFileW(path.c_str());
+    std::lock_guard<std::mutex> lock(temporaryDirectoryMutex);
     if (!directory.empty()) RemoveDirectoryW(directory.c_str());
+    // Never recurse: other measures and unrelated files keep Temp in place.
+    if (!temporaryRoot.empty()) RemoveDirectoryW(temporaryRoot.c_str());
 }
 
-void ExtractAnimation(const std::wstring& path, Animation& output, const std::function<bool()>& cancelled,
+void ExtractAnimation(const std::wstring& path, const std::wstring& resources, Animation& output, const std::function<bool()>& cancelled,
     const std::function<void(const Animation&)>& firstFrame)
 {
     Cancel(cancelled);
-    Require(output.directory.empty() && output.frames.empty(), "Extraction destination is already in use");
+    Require(output.directory.empty() && output.temporaryRoot.empty() && output.frames.empty(), "Extraction destination is already in use");
     ComScope com;
     ComPtr<IWICImagingFactory> factory;
     Check(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)));
@@ -507,15 +520,22 @@ void ExtractAnimation(const std::wstring& path, Animation& output, const std::fu
         }
     }
     Cancel(cancelled);
-    wchar_t temp[MAX_PATH + 1]{};
-    const DWORD tempLength = GetTempPathW(MAX_PATH + 1, temp);
-    Require(tempLength && tempLength < MAX_PATH - 50, "Cannot locate temporary directory");
+    Require(!resources.empty(), "Cannot locate skin @Resources directory");
+    std::wstring root = resources;
+    if (root.back() != L'\\' && root.back() != L'/') root += L'\\';
+    root += L"Temp";
     GUID id;
     Check(CoCreateGuid(&id));
     wchar_t guid[40]; StringFromGUID2(id, guid, 40);
-    const std::wstring directory = std::wstring(temp) + L"Rainmeter-Animate-" + guid;
-    Require(CreateDirectoryW(directory.c_str(), nullptr) != FALSE, "Cannot create frame directory");
-    output.directory = directory;
+    const std::wstring directory = root + L"\\Rainmeter-Animate-" + guid;
+    {
+        std::lock_guard<std::mutex> lock(temporaryDirectoryMutex);
+        EnsureDirectory(resources);
+        EnsureDirectory(root);
+        output.temporaryRoot = root;
+        Require(CreateDirectoryW(directory.c_str(), nullptr) != FALSE, "Cannot create skin frame directory");
+        output.directory = directory;
+    }
     if (gif) Gif(factory.Get(), path, output, cancelled, firstFrame);
     else if (bytes.size() >= 12 && std::memcmp(bytes.data(), "RIFF", 4) == 0 && std::memcmp(bytes.data() + 8, "WEBP", 4) == 0)
     {

@@ -14,6 +14,7 @@ struct AnimationCancelled : std::exception
 struct Animation
 {
     std::wstring directory;
+    std::wstring temporaryRoot;
     std::wstring preview;
     std::vector<std::wstring> frames;
     // Per-frame display durations in milliseconds, with a 10 ms minimum.
@@ -24,5 +25,5 @@ struct Animation
     Animation& operator=(const Animation&) = delete;
 };
 
-void ExtractAnimation(const std::wstring& path, Animation& output, const std::function<bool()>& cancelled = {},
+void ExtractAnimation(const std::wstring& path, const std::wstring& resources, Animation& output, const std::function<bool()>& cancelled = {},
     const std::function<void(const Animation&)>& firstFrame = {});

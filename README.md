@@ -156,13 +156,18 @@ UI thread, so frames may be skipped visually during a long skin update.
 Images are decoded once in the background, and Rainmeter loads the extracted BMP files
 for display. Large images or very short intervals can increase display work.
 
-Every measure has a unique `%TEMP%\Rainmeter-Animate-{GUID}` folder, where
-`%TEMP%` is the Windows temporary directory returned by `GetTempPathW` and
-`{GUID}` is a newly generated identifier. Extracted frames are named
+Every extraction has a unique `#@#Temp\Rainmeter-Animate-{GUID}` folder, where
+`#@#` is Rainmeter's `@Resources` directory for the skin and `{GUID}` is a newly
+generated identifier. Animate creates `@Resources` and its `Temp` directory if
+they do not exist. This keeps active animation frames outside Windows Temp,
+where disk-cleaning utilities can remove them during playback.
+The skin's resource directory must be writable; a creation failure is reported
+once for that load in Rainmeter's log, with no fallback to Windows Temp.
+Extracted frames are named
 `frame-0.bmp`, `frame-1.bmp`, `frame-2.bmp`, and so on. For example:
 
 ```text
-%TEMP%\Rainmeter-Animate-{GUID}\frame-0.bmp
+<Skin>\@Resources\Temp\Rainmeter-Animate-{GUID}\frame-0.bmp
 ```
 
 `loading.png` is the separate annotated first-frame preview in that same
@@ -180,6 +185,20 @@ after the current codec operation reaches a cancellation checkpoint; the UI
 does not wait for it.
 Failed extractions also clean up their partial output. Only files created by
 this instance are deleted; cleanup does not recursively traverse directories.
+After removing its extraction folder, Animate removes `Temp` only if it is
+empty. Other measures' frames and unrelated files are preserved. The last
+measure's cleanup removes the empty `Temp` folder, and `@Resources` always
+remains. Source changes and extraction cancellation follow the same rules.
+
+Version **1.5.0** moves extraction from Windows Temp to the skin resource
+directory. Directory creation and cleanup remain on the background worker;
+playback commands and frame timing are unchanged.
+Validation on November 6, 2026: x64 and Win32 regression tests passed, including
+concurrent extractions, shared `Temp` cleanup, unrelated-file preservation,
+source changes, cancellation, and the large GIF test. A fresh skin in running
+Rainmeter created its missing `@Resources`, extracted all eight WebP sample
+frames under `Temp`, and removed `Temp` on unload while retaining `@Resources`.
+See `tests/skin-storage-results.json` for the live storage check.
 
 Large-file regression check (November 1, 2026): a 715 × 584 pixel `A.gif` with
 235 frames loaded in about **2.5–2.8 seconds**, with its annotated preview

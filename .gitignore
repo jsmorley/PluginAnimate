@@ -9,3 +9,5 @@
 *.VC.db
 *.VC.opendb
 __pycache__/
+# Generated Animate frames when an example is loaded from this checkout.
+**/@Resources/Temp/Rainmeter-Animate-*/

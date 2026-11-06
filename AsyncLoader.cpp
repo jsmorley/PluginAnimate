@@ -15,11 +15,12 @@ struct AsyncLoader::Context
     HMODULE module = nullptr;
 };
 
-std::shared_ptr<AsyncLoader> AsyncLoader::Create(HWND window, UINT message)
+std::shared_ptr<AsyncLoader> AsyncLoader::Create(HWND window, UINT message, std::wstring resources)
 {
     auto loader = std::make_shared<AsyncLoader>();
     loader->window = window;
     loader->message = message;
+    loader->resources = std::move(resources);
     auto context = std::make_unique<Context>();
     context->loader = loader;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
@@ -136,7 +137,7 @@ void AsyncLoader::Run()
         try
         {
             loaded = std::make_unique<Animation>();
-            ExtractAnimation(path, *loaded, cancelled, [&](const Animation& animation) {
+            ExtractAnimation(path, resources, *loaded, cancelled, [&](const Animation& animation) {
                 if (!SafeArgument(animation.preview)) throw std::runtime_error("Temporary path contains unsupported bang delimiters");
                 std::lock_guard<std::mutex> lock(mutex);
                 if (cancelled()) return;

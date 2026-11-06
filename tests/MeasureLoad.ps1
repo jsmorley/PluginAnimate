@@ -20,7 +20,7 @@ public static class AnimateUiProbe {
 '@
 $window = [AnimateUiProbe]::FindWindow('DummyRainWClass', 'Rainmeter control window')
 if ($window -eq [IntPtr]::Zero) { throw 'Rainmeter control window not found.' }
-$tempRoot = [IO.Path]::GetTempPath()
+$tempRoot = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Rainmeter\Skins\Animate\@Resources\Temp'
 $before = @{}
 $wasActive = $false
 $inSection = $false
@@ -40,7 +40,9 @@ function Send-RainmeterBang([string]$arguments) {
 try {
     if (-not $wasActive) { Send-RainmeterBang '!ActivateConfig Animate Animate.ini' }
     Start-Sleep -Milliseconds 500
-    Get-ChildItem -LiteralPath $tempRoot -Directory -Filter 'Rainmeter-Animate-*' | ForEach-Object { $before[$_.FullName] = $true }
+    if (Test-Path -LiteralPath $tempRoot) {
+        Get-ChildItem -LiteralPath $tempRoot -Directory -Filter 'Rainmeter-Animate-*' | ForEach-Object { $before[$_.FullName] = $true }
+    }
     $watch = [Diagnostics.Stopwatch]::StartNew()
     Send-RainmeterBang ('!SetOption MeasureAnimate ImageName "' + $animationPath + '" Animate')
     Send-RainmeterBang '!SetOption MeasureAnimate DisplayLoading 1 Animate'
@@ -53,7 +55,7 @@ try {
         $probe.Stop()
         if ($sent -eq [IntPtr]::Zero) { ++$timeouts }
         else { $responses += $probe.Elapsed.TotalMilliseconds }
-        if (-not $candidate) {
+        if (-not $candidate -and (Test-Path -LiteralPath $tempRoot)) {
             $candidate = Get-ChildItem -LiteralPath $tempRoot -Directory -Filter 'Rainmeter-Animate-*' |
                 Where-Object { -not $before.ContainsKey($_.FullName) } | Select-Object -First 1 -ExpandProperty FullName
         }
@@ -70,6 +72,7 @@ try {
     $result = [PSCustomObject]@{
         File = [IO.Path]::GetFileName($animationPath)
         FrameFormat = '32-bit BMP V5'
+        FrameStorage = 'Skin @Resources\Temp'
         ReadyMilliseconds = $readyMilliseconds
         DurationSeconds = $watch.Elapsed.TotalSeconds
         SuccessfulUiResponses = $responses.Count

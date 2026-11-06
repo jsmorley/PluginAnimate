@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <fstream>
+#include <array>
 #include <wincodec.h>
 #include <wrl/client.h>
 
@@ -17,6 +18,7 @@
 enum { LOG_ERROR = 1, LOG_WARNING = 2 };
 std::map<std::wstring, std::wstring> options;
 std::vector<std::wstring> commands, errors;
+std::wstring testResources;
 void* RmGetSkin(void* rm) { return rm; }
 double RmReadDouble(void* rm, LPCWSTR name, double value) { return RmReadFormula(rm, name, value); }
 LPCWSTR __stdcall RmReadString(void*, LPCWSTR key, LPCWSTR fallback, BOOL)
@@ -29,6 +31,7 @@ double __stdcall RmReadFormula(void*, LPCWSTR key, double fallback)
     auto found = options.find(key);
     return found == options.end() ? fallback : std::stod(found->second);
 }
+LPCWSTR __stdcall RmReplaceVariables(void*, LPCWSTR) { return testResources.c_str(); }
 LPCWSTR __stdcall RmPathToAbsolute(void*, LPCWSTR path) { return path; }
 void __stdcall RmLog(void*, int, LPCWSTR message) { errors.emplace_back(message); }
 void __stdcall RmExecute(void*, LPCWSTR command) { commands.emplace_back(command); }
@@ -71,24 +74,97 @@ std::vector<BYTE> ReadPixels(const std::wstring& path)
     Assert(SUCCEEDED(convert->CopyPixels(nullptr, w * 4, static_cast<UINT>(pixels.size()), pixels.data())), "Read pixels");
     return pixels;
 }
+void ExtractTestAnimation(const std::wstring& path, Animation& output, const std::function<bool()>& cancelled = {},
+    const std::function<void(const Animation&)>& firstFrame = {})
+{
+    ExtractAnimation(path, testResources, output, cancelled, firstFrame);
+}
+struct TestSkin
+{
+    std::filesystem::path skin, resources;
+    TestSkin()
+    {
+        wchar_t executable[MAX_PATH]{};
+        Assert(GetModuleFileNameW(nullptr, executable, MAX_PATH) != 0, "Find test build directory");
+        GUID id{}; Assert(SUCCEEDED(CoCreateGuid(&id)), "Create test skin identifier");
+        wchar_t guid[40]{}; StringFromGUID2(id, guid, 40);
+        skin = std::filesystem::path(executable).parent_path() / (std::wstring(L"test-skin-") + guid);
+        Assert(std::filesystem::create_directory(skin), "Create isolated test skin");
+        resources = skin / L"@Resources";
+        testResources = resources.wstring();
+    }
+    ~TestSkin()
+    {
+        RemoveDirectoryW(resources.c_str());
+        RemoveDirectoryW(skin.c_str());
+    }
+};
 int wmain(int argc, wchar_t** argv)
 {
     try
     {
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        TestSkin testSkin;
         if (argc == 2)
         {
             Animation sample;
-            ExtractAnimation(argv[1], sample);
+            ExtractTestAnimation(argv[1], sample);
             std::cout << "Sample decoded: " << sample.frames.size() << " frames\n";
         }
         auto fixture = [](const wchar_t* name) { return std::filesystem::absolute(std::filesystem::path(L"tests/fixtures") / name).wstring(); };
+        {
+            const auto temp = testSkin.resources / L"Temp";
+            std::array<std::unique_ptr<Animation>, 2> animations;
+            std::array<std::exception_ptr, 2> failures;
+            std::array<std::thread, 2> workers;
+            for (size_t i = 0; i < workers.size(); ++i)
+                workers[i] = std::thread([&, i] {
+                    try
+                    {
+                        animations[i] = std::make_unique<Animation>();
+                        ExtractTestAnimation(fixture(L"blend.webp"), *animations[i]);
+                    }
+                    catch (...) { failures[i] = std::current_exception(); }
+                });
+            for (auto& worker : workers) worker.join();
+            for (const auto& failure : failures) if (failure) std::rethrow_exception(failure);
+            Assert(std::filesystem::is_directory(testSkin.resources) && std::filesystem::is_directory(temp),
+                "Creates missing @Resources and Temp inside the skin");
+            Assert(std::filesystem::path(animations[0]->directory).parent_path() == temp &&
+                animations[0]->directory != animations[1]->directory, "Concurrent measures use isolated skin frame folders");
+            animations[0].reset();
+            Assert(std::filesystem::exists(animations[1]->frames[0]), "One measure's cleanup preserves another measure's frames");
+            animations[1].reset();
+            Assert(!std::filesystem::exists(temp) && std::filesystem::is_directory(testSkin.resources),
+                "Last extraction removes empty Temp but leaves @Resources");
+            std::filesystem::create_directory(temp);
+            const auto unrelated = temp / L"unrelated.txt";
+            { std::ofstream file(unrelated); file << "Keep this file"; }
+            {
+                Animation animation;
+                ExtractTestAnimation(fixture(L"disposal.gif"), animation);
+            }
+            Assert(std::filesystem::exists(unrelated), "Cleanup preserves unrelated Temp files");
+            std::filesystem::remove(unrelated);
+            std::filesystem::remove(temp);
+            const auto blocked = testSkin.skin / L"blocked-resources";
+            { std::ofstream file(blocked); file << "Not a directory"; }
+            bool rejected = false;
+            try
+            {
+                Animation animation;
+                ExtractAnimation(fixture(L"blend.webp"), blocked.wstring(), animation);
+            }
+            catch (const std::runtime_error&) { rejected = true; }
+            Assert(rejected && !std::filesystem::exists(temp), "Unwritable resource location fails without Windows Temp fallback");
+            std::filesystem::remove(blocked);
+        }
         for (const auto* name : {L"blend.apng", L"poster.png", L"disposal.gif"})
         {
             std::wstring dir;
             {
                 Animation animation;
-                ExtractAnimation(fixture(name), animation);
+                ExtractTestAnimation(fixture(name), animation);
                 dir = animation.directory;
                 Assert(animation.frames.size() == 4, "Frame count / APNG poster exclusion");
                 Assert(std::filesystem::path(animation.frames[0]).extension() == L".bmp", "Animation frames use BMP files");
@@ -108,14 +184,14 @@ int wmain(int argc, wchar_t** argv)
         }
         {
             Animation zero, missing;
-            ExtractAnimation(fixture(L"denominator-zero.apng"), zero);
-            ExtractAnimation(fixture(L"no-delay.gif"), missing);
+            ExtractTestAnimation(fixture(L"denominator-zero.apng"), zero);
+            ExtractTestAnimation(fixture(L"no-delay.gif"), missing);
             Assert(zero.delays[0] == 80, "APNG denominator zero means 100");
             Assert(missing.delays[0] == 100, "Missing GIF delay defaults to 100 ms");
         }
         {
             Animation alpha;
-            ExtractAnimation(fixture(L"alpha.apng"), alpha);
+            ExtractTestAnimation(fixture(L"alpha.apng"), alpha);
             const auto pixels = ReadPixels(alpha.frames[0]);
             Assert(pixels[3] == 0 && pixels[7] == 64 && pixels[11] == 128 && pixels[15] == 255,
                 "BMP V5 preserves transparent, partially transparent, and opaque alpha values");
@@ -133,7 +209,7 @@ int wmain(int argc, wchar_t** argv)
         {
             Animation webp;
             bool preview = false;
-            ExtractAnimation(fixture(L"blend.webp"), webp, {}, [&](const Animation& first) {
+            ExtractTestAnimation(fixture(L"blend.webp"), webp, {}, [&](const Animation& first) {
                 Assert(first.frames.size() == 1 && first.delays[0] == 80 && !first.preview.empty(), "WebP first-frame preview");
                 preview = true;
             });
@@ -148,16 +224,16 @@ int wmain(int argc, wchar_t** argv)
                 "WebP BACKGROUND disposal and frame offset");
             Assert(ReadPixels(webp.frames[3]) == std::vector<BYTE>(16,0), "WebP transparent SOURCE replaces canvas");
             Animation alpha, lossy;
-            ExtractAnimation(fixture(L"alpha.webp"), alpha);
+            ExtractTestAnimation(fixture(L"alpha.webp"), alpha);
             const auto rgba = ReadPixels(alpha.frames[0]);
             Assert(rgba[3] == 0 && rgba[7] == 64 && rgba[11] == 128 && rgba[15] == 255 && rgba[12] == 200,
                 "WebP alpha preserved in BMP V5");
-            ExtractAnimation(fixture(L"lossy.webp"), lossy);
+            ExtractTestAnimation(fixture(L"lossy.webp"), lossy);
             const auto rgb = ReadPixels(lossy.frames[0]);
             Assert(lossy.frames.size() == 2 && lossy.delays == std::vector<UINT>({40,60}) && rgb[2] > 240 && rgb[3] == 255,
                 "Lossy WebP decoding");
             Animation sample;
-            ExtractAnimation(L"examples/Animate/@Resources/DancingBanana.webp", sample);
+            ExtractTestAnimation(L"examples/Animate/@Resources/DancingBanana.webp", sample);
             Assert(sample.frames.size() == 8, "Bundled animated WebP example decodes");
         }
         for (const auto* name : {L"bad.webp", L"truncated.webp", L"oversized.webp", L"static.webp", L"excessive-duration.webp"})
@@ -166,7 +242,7 @@ int wmain(int argc, wchar_t** argv)
             {
                 Animation bad;
                 bool rejected = false;
-                try { ExtractAnimation(fixture(name), bad); } catch (const std::runtime_error&) { rejected = true; }
+                try { ExtractTestAnimation(fixture(name), bad); } catch (const std::runtime_error&) { rejected = true; }
                 dir = bad.directory;
                 Assert(rejected, "Reject invalid, static, oversized, or excessive-duration WebP");
             }
@@ -177,7 +253,7 @@ int wmain(int argc, wchar_t** argv)
             bool cancelled = false;
             {
                 Animation partial;
-                try { ExtractAnimation(fixture(L"blend.webp"), partial, [&] { return !partial.frames.empty(); }); }
+                try { ExtractTestAnimation(fixture(L"blend.webp"), partial, [&] { return !partial.frames.empty(); }); }
                 catch (const AnimationCancelled&) { cancelled = true; }
                 dir = partial.directory;
             }
@@ -187,7 +263,7 @@ int wmain(int argc, wchar_t** argv)
         {
             Animation bad;
             bool rejected = false;
-            try { ExtractAnimation(fixture(L"bad.apng"), bad); } catch (...) { rejected = true; }
+            try { ExtractTestAnimation(fixture(L"bad.apng"), bad); } catch (...) { rejected = true; }
             badDir = bad.directory;
             Assert(rejected, "Reject corrupted PNG");
         }
@@ -196,7 +272,7 @@ int wmain(int argc, wchar_t** argv)
             Animation previewed;
             bool shown = false;
             std::vector<BYTE> original;
-            ExtractAnimation(L"examples/Animate/@Resources/Loading.gif", previewed, {}, [&](const Animation& first) {
+            ExtractTestAnimation(L"examples/Animate/@Resources/Loading.gif", previewed, {}, [&](const Animation& first) {
                 Assert(first.frames.size() == 1 && !first.preview.empty(), "Preview is published with only the first frame extracted");
                 original = ReadPixels(first.frames[0]);
                 const auto annotated = ReadPixels(first.preview);
@@ -215,7 +291,7 @@ int wmain(int argc, wchar_t** argv)
             bool cancelled = false;
             {
                 Animation partial;
-                try { ExtractAnimation(fixture(L"blend.apng"), partial, [&] { return !partial.frames.empty(); }); }
+                try { ExtractTestAnimation(fixture(L"blend.apng"), partial, [&] { return !partial.frames.empty(); }); }
                 catch (const AnimationCancelled&) { cancelled = true; }
                 cancelledDir = partial.directory;
             }
@@ -382,6 +458,8 @@ int wmain(int argc, wchar_t** argv)
         Finalize(data);
         Until([&] { return cleanup.expired(); }, "Background cleanup completes");
         Assert(!std::filesystem::exists(finalDir), "Finalize removes temporary folder");
+        Assert(!std::filesystem::exists(testSkin.resources / L"Temp") && std::filesystem::is_directory(testSkin.resources),
+            "Finalize removes empty skin Temp and retains @Resources");
         Pump(60); // Pending timer messages after finalization must be harmless.
         Assert(errors.empty(), "No unexpected plugin errors");
         if (argc == 3 && std::wstring(argv[1]) == L"--large")

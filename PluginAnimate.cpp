@@ -203,7 +203,9 @@ PLUGIN_EXPORT void Initialize(void** data, void* rm)
     {
         try
         {
-            measure->loader = AsyncLoader::Create(measure->window, LoadMessage);
+            // Resolve Rainmeter's skin resource directory on the UI thread only.
+            std::wstring resources = RmReplaceVariables(rm, L"#@#");
+            measure->loader = AsyncLoader::Create(measure->window, LoadMessage, std::move(resources));
             measure->worker = std::thread(&Measure::Run, measure.get());
         }
         catch (const std::exception&)

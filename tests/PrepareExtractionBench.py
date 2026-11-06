@@ -9,6 +9,7 @@ out = root / "tests/x64/Bench"
 out.mkdir(parents=True, exist_ok=True)
 source = (root / "Animation.cpp").read_text(encoding="utf-8")
 source = source.replace('#include "Animation.h"', '#include "../../../Animation.h"')
+source = source.replace('#include "third_party/', '#include "../../../third_party/')
 
 
 def replace(old, new):
@@ -56,7 +57,7 @@ int wmain(int argc, wchar_t** argv)
         fast = std::wstring(argv[1]).find(L"fast") != std::wstring::npos;
         const auto begin = std::chrono::steady_clock::now();
         Animation animation;
-        ExtractAnimation(argv[2], animation);
+        ExtractAnimation(argv[2], std::filesystem::absolute("tests/x64/Bench/@Resources").wstring(), animation);
         const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
         const auto extractDecodeMs = decodeMs;
         uint64_t bytes = 0;
@@ -87,6 +88,7 @@ int wmain(int argc, wchar_t** argv)
 project = (root / "tests/Tests.vcxproj").read_text(encoding="utf-8-sig")
 project = project.replace('<ClCompile Include="Tests.cpp" /><ClCompile Include="..\\Animation.cpp" /><ClCompile Include="..\\AsyncLoader.cpp" />', '<ClCompile Include="Bench.cpp" />')
 project = project.replace('<TargetName>Tests</TargetName>', '<TargetName>Bench</TargetName>')
+project = project.replace('..\\third_party\\WebP.props', '..\\..\\..\\third_party\\WebP.props')
 project = project.replace('{BB7D8B43-68CE-493D-B516-0497F95C42F6}', '{40D0C1CF-E2F8-42EB-A35F-7E499523BEEF}')
 (out / "Bench.vcxproj").write_text(project, encoding="utf-8")
 print(out)
