@@ -21,13 +21,27 @@ constexpr size_t MaxFrames = 10000;
 constexpr uint64_t MaxOutputBytes = 1024ull * 1024 * 1024;
 // Serialize shared Temp creation/removal across measures and background cleanup.
 std::mutex temporaryDirectoryMutex;
+constexpr wchar_t OwnerName[] = L"\\.animate-owner";
+constexpr char OwnerSignature[] = "Rainmeter Animate extraction owner v1\r\n";
+struct FileHandle
+{
+    HANDLE value = INVALID_HANDLE_VALUE;
+    ~FileHandle() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+};
+bool PlainDirectory(const std::wstring& path)
+{
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) &&
+        !(attributes & FILE_ATTRIBUTE_REPARSE_POINT);
+}
 void Check(HRESULT hr) { if (FAILED(hr)) throw std::runtime_error("Windows image codec operation failed"); }
 void Require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
 void EnsureDirectory(const std::wstring& path)
 {
     if (CreateDirectoryW(path.c_str(), nullptr)) return;
     const DWORD attributes = GetFileAttributesW(path.c_str());
-    Require(attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY),
+    Require(attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) &&
+        !(attributes & FILE_ATTRIBUTE_REPARSE_POINT),
         "Cannot create skin @Resources or Temp directory; check write permissions");
 }
 void Cancel(const std::function<bool()>& cancelled)
@@ -486,15 +500,88 @@ Animation::~Animation()
     if (!preview.empty()) DeleteFileW(preview.c_str());
     for (const auto& path : frames) DeleteFileW(path.c_str());
     std::lock_guard<std::mutex> lock(temporaryDirectoryMutex);
+    if (ownerFile != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(ownerFile);
+        if (!directory.empty()) DeleteFileW((directory + OwnerName).c_str());
+    }
     if (!directory.empty()) RemoveDirectoryW(directory.c_str());
     // Never recurse: other measures and unrelated files keep Temp in place.
     if (!temporaryRoot.empty()) RemoveDirectoryW(temporaryRoot.c_str());
+}
+
+void CleanupOrphanAnimations(const std::wstring& resources)
+{
+    if (resources.empty()) return;
+    std::wstring root = resources;
+    if (root.back() != L'\\' && root.back() != L'/') root += L'\\';
+    root += L"Temp";
+    std::lock_guard<std::mutex> lock(temporaryDirectoryMutex);
+    if (!PlainDirectory(resources) || !PlainDirectory(root)) return;
+    WIN32_FIND_DATAW entry{};
+    HANDLE search = FindFirstFileW((root + L"\\Rainmeter-Animate-*").c_str(), &entry);
+    if (search == INVALID_HANDLE_VALUE) return;
+    do
+    {
+        const std::wstring name = entry.cFileName;
+        const std::wstring prefix = L"Rainmeter-Animate-";
+        if (name.size() != prefix.size() + 38 || name.compare(0, prefix.size(), prefix) != 0 ||
+            !(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+            (entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+        GUID id{};
+        if (FAILED(CLSIDFromString(name.c_str() + prefix.size(), &id))) continue;
+        const std::wstring folder = root + L"\\" + name;
+        const std::wstring owner = folder + OwnerName;
+        const DWORD attributes = GetFileAttributesW(owner.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) continue;
+        // Exclusive open fails while any live extraction owns the marker,
+        // including extractions in another Rainmeter process or DLL version.
+        FileHandle lease;
+        lease.value = CreateFileW(owner.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (lease.value == INVALID_HANDLE_VALUE) continue;
+        char signature[sizeof(OwnerSignature)]{};
+        DWORD bytes = 0;
+        if (!ReadFile(lease.value, signature, sizeof(signature), &bytes, nullptr) ||
+            bytes != sizeof(OwnerSignature) - 1 ||
+            std::memcmp(signature, OwnerSignature, sizeof(OwnerSignature) - 1) != 0) continue;
+        std::vector<std::wstring> files;
+        WIN32_FIND_DATAW child{};
+        HANDLE contents = FindFirstFileW((folder + L"\\*").c_str(), &child);
+        if (contents == INVALID_HANDLE_VALUE) continue;
+        bool safe = true;
+        do
+        {
+            const std::wstring file = child.cFileName;
+            if (file == L"." || file == L".." || file == L".animate-owner") continue;
+            const bool frame = file.size() > 10 && file.compare(0, 6, L"frame-") == 0 &&
+                file.compare(file.size() - 4, 4, L".bmp") == 0 &&
+                file.find_first_not_of(L"0123456789", 6) == file.size() - 4;
+            if ((child.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+                (!frame && file != L"loading.png")) { safe = false; break; }
+            files.push_back(folder + L"\\" + file);
+        } while (FindNextFileW(contents, &child));
+        if (safe && GetLastError() != ERROR_NO_MORE_FILES) safe = false;
+        FindClose(contents);
+        if (!safe) continue;
+        for (const auto& file : files) if (!DeleteFileW(file.c_str())) safe = false;
+        // Keep the marker on partial failure so a later run can retry.
+        if (!safe) continue;
+        CloseHandle(lease.value);
+        lease.value = INVALID_HANDLE_VALUE;
+        if (DeleteFileW(owner.c_str())) RemoveDirectoryW(folder.c_str());
+    } while (FindNextFileW(search, &entry));
+    FindClose(search);
+    // Never recursively remove the shared Temp directory.
+    RemoveDirectoryW(root.c_str());
 }
 
 void ExtractAnimation(const std::wstring& path, const std::wstring& resources, Animation& output, const std::function<bool()>& cancelled,
     const std::function<void(const Animation&)>& firstFrame)
 {
     Cancel(cancelled);
+    CleanupOrphanAnimations(resources);
     Require(output.directory.empty() && output.temporaryRoot.empty() && output.frames.empty(), "Extraction destination is already in use");
     ComScope com;
     ComPtr<IWICImagingFactory> factory;
@@ -535,6 +622,13 @@ void ExtractAnimation(const std::wstring& path, const std::wstring& resources, A
         output.temporaryRoot = root;
         Require(CreateDirectoryW(directory.c_str(), nullptr) != FALSE, "Cannot create skin frame directory");
         output.directory = directory;
+        output.ownerFile = CreateFileW((directory + OwnerName).c_str(), GENERIC_READ | GENERIC_WRITE,
+            0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Require(output.ownerFile != INVALID_HANDLE_VALUE, "Cannot create frame ownership marker");
+        DWORD written = 0;
+        Require(WriteFile(output.ownerFile, OwnerSignature, sizeof(OwnerSignature) - 1, &written, nullptr) &&
+            written == sizeof(OwnerSignature) - 1 && FlushFileBuffers(output.ownerFile),
+            "Cannot write frame ownership marker");
     }
     if (gif) Gif(factory.Get(), path, output, cancelled, firstFrame);
     else if (bytes.size() >= 12 && std::memcmp(bytes.data(), "RIFF", 4) == 0 && std::memcmp(bytes.data() + 8, "WEBP", 4) == 0)

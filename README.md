@@ -185,6 +185,20 @@ UI thread, so frames may be skipped visually during a long skin update.
 Images are decoded once in the background, and Rainmeter loads the extracted BMP files
 for display. Large images or very short intervals can increase display work.
 
+Version **1.7.0** adds automatic recovery of crash-orphaned frame folders.
+
+Before each extraction, Animate checks this skin's `@Resources\Temp` for
+orphaned extraction folders left by a crash. New extraction folders contain
+an `.animate-owner` marker with a fixed signature held exclusively open for their entire
+lifetime. Windows releases that handle when the process terminates. Recovery
+requires a valid GUID folder name, the exact marker signature, and an available
+exclusive lock. Active extractions are preserved, including those owned by
+another Rainmeter process. Recovery never recurses or follows directory links;
+only generated `frame-<number>.bmp`, `loading.png`, and the marker are removed.
+Folders with unexpected contents or missing/invalid markers are left intact.
+Older unmarked extraction folders require manual cleanup. Recovery runs on the
+background extraction worker; skins that are never started are not scanned.
+
 Every extraction has a unique `#@#Temp\Rainmeter-Animate-{GUID}` folder, where
 `#@#` is Rainmeter's `@Resources` directory for the skin and `{GUID}` is a newly
 generated identifier. Animate creates `@Resources` and its `Temp` directory if

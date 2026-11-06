@@ -113,6 +113,42 @@ int wmain(int argc, wchar_t** argv)
         }
         auto fixture = [](const wchar_t* name) { return std::filesystem::absolute(std::filesystem::path(L"tests/fixtures") / name).wstring(); };
         {
+            Animation active, orphan;
+            ExtractTestAnimation(fixture(L"blend.webp"), active);
+            ExtractTestAnimation(fixture(L"blend.webp"), orphan);
+            const std::filesystem::path stale = orphan.directory;
+            // Model process termination: Windows releases the owner handle,
+            // but the Animation destructor never gets to remove its files.
+            CloseHandle(orphan.ownerFile);
+            orphan.ownerFile = INVALID_HANDLE_VALUE;
+            orphan.directory.clear(); orphan.temporaryRoot.clear();
+            orphan.preview.clear(); orphan.frames.clear();
+            const auto unrelated = stale / L"keep.txt";
+            { std::ofstream file(unrelated); file << "Unrelated data"; }
+            CleanupOrphanAnimations(testResources);
+            Assert(std::filesystem::exists(unrelated) && std::filesystem::exists(stale / L"frame-0.bmp"),
+                "Orphan recovery preserves entire folder when unexpected files exist");
+            std::filesystem::remove(unrelated);
+            {
+                Animation next;
+                ExtractTestAnimation(fixture(L"blend.webp"), next);
+                Assert(!std::filesystem::exists(stale), "Next extraction recovers unlocked orphan folder");
+                Assert(std::filesystem::exists(active.frames[0]), "Orphan recovery preserves active extraction");
+            }
+            const auto legacy = std::filesystem::path(active.temporaryRoot) /
+                L"Rainmeter-Animate-{00000000-0000-0000-0000-000000000001}";
+            std::filesystem::create_directory(legacy);
+            { std::ofstream file(legacy / L"frame-0.bmp"); file << "Unverified legacy data"; }
+            CleanupOrphanAnimations(testResources);
+            Assert(std::filesystem::exists(legacy / L"frame-0.bmp"), "Unmarked legacy folders are preserved");
+            { std::ofstream file(legacy / L".animate-owner"); file << "Invalid marker"; }
+            CleanupOrphanAnimations(testResources);
+            Assert(std::filesystem::exists(legacy / L"frame-0.bmp"), "Invalid ownership marker is preserved");
+            std::filesystem::remove(legacy / L"frame-0.bmp");
+            std::filesystem::remove(legacy / L".animate-owner");
+            std::filesystem::remove(legacy);
+        }
+        {
             const auto temp = testSkin.resources / L"Temp";
             std::array<std::unique_ptr<Animation>, 2> animations;
             std::array<std::exception_ptr, 2> failures;
@@ -529,7 +565,9 @@ int wmain(int argc, wchar_t** argv)
             Until([&] { return !m->loading; }, "External-deletion test starts playback");
             const auto temp = testSkin.resources / L"Temp";
             Assert(temp.parent_path() == testSkin.resources && std::filesystem::exists(temp), "Deletion target is inside the isolated test skin");
-            std::filesystem::remove_all(temp);
+            // The live ownership marker deliberately prevents deleting the whole
+            // folder. Frames themselves remain externally deletable.
+            for (const auto& frame : m->animation->frames) std::filesystem::remove(frame);
             Assert(Update(data) == 0 && !m->playing && !m->animation && errors.size() == 1,
                 "Skin update detects external deletion without waiting for the 30-second timer");
             Assert(commands.back().find(L"ImageName \"\"") != std::wstring::npos, "External deletion clears the Image meter");
@@ -538,7 +576,7 @@ int wmain(int argc, wchar_t** argv)
             ExecuteBang(data, L"start");
             Until([&] { return !m->loading; }, "Start rebuilds externally deleted frames");
             Assert(m->playing && m->animation && errors.size() == 1, "Rebuild succeeds without a stale error");
-            std::filesystem::remove_all(temp);
+            for (const auto& frame : m->animation->frames) std::filesystem::remove(frame);
             m->Show();
             Assert(!m->playing && errors.size() == 2, "Frame presentation also catches external deletion once per Start");
             cleanup = m->loader;

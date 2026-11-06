@@ -16,6 +16,7 @@ struct Animation
     std::wstring directory;
     std::wstring temporaryRoot;
     std::wstring preview;
+    HANDLE ownerFile = INVALID_HANDLE_VALUE;
     std::vector<std::wstring> frames;
     // Per-frame display durations in milliseconds, with a 10 ms minimum.
     std::vector<UINT> delays;
@@ -24,6 +25,9 @@ struct Animation
     Animation(const Animation&) = delete;
     Animation& operator=(const Animation&) = delete;
 };
+
+// Best-effort recovery of marked, unlocked extraction folders in this skin only.
+void CleanupOrphanAnimations(const std::wstring& resources);
 
 void ExtractAnimation(const std::wstring& path, const std::wstring& resources, Animation& output, const std::function<bool()>& cancelled = {},
     const std::function<void(const Animation&)>& firstFrame = {});
