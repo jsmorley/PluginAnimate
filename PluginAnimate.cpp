@@ -115,7 +115,8 @@ struct Measure
             command += L"[!Redraw]";
             // RmExecute is synchronous. This posted message runs after the meter
             // has stopped using the old paths, keeping deletion off the UI thread.
-            if (!retired.empty()) PostMessageW(window, RetireMessage, 0, 0);
+            if (!retired.empty() || (animation && !animation->preview.empty()))
+                PostMessageW(window, RetireMessage, 0, 0);
         }
         if (!error.empty()) RmLog(rm, LOG_ERROR, error.c_str());
         // Execute last: meter actions can refresh/unload this measure during RmExecute.
@@ -140,7 +141,6 @@ struct Measure
                 loading = false;
                 preview.clear();
                 originalPreview.clear();
-                if (animation) loader->DiscardPreview(std::move(animation->preview));
                 if (animation && startWhenReady && !meter.empty()) StartPlayback();
                 // Keep Start pending after a bad weather icon path. A later
                 // WebParser source change can then begin playback automatically.
@@ -187,7 +187,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     if (message == RetireMessage && measure)
     {
         std::lock_guard<std::mutex> lock(measure->mutex);
-        if (measure->loader) measure->loader->Retire(std::move(measure->retired));
+        if (measure->loader)
+        {
+            if (measure->animation && !measure->animation->preview.empty())
+                measure->loader->DiscardPreview(std::move(measure->animation->preview), std::move(measure->animation->previewLock));
+            measure->loader->Retire(std::move(measure->retired));
+        }
         return 0;
     }
     if (message == LoadMessage && measure)

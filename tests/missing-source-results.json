@@ -1,9 +1,9 @@
 {
-  "Version": "1.6.0",
+  "Version": "1.8.0",
   "SkinUpdateMilliseconds": 10,
   "SkinUpdates": 500,
   "ExplicitStartCommands": 3,
   "ErrorsObserved": 3,
   "OnlyExpectedErrors": true,
-  "ExternalTempDeletion": false
+  "DeletionAttemptBlocked": false
 }

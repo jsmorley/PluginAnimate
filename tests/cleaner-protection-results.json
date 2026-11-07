@@ -1,0 +1,9 @@
+{
+  "Version": "1.8.0",
+  "TestMethod": "Direct deletion attempts only",
+  "Frames": 8,
+  "AllHashesUnchanged": true,
+  "DeletionDenied": true,
+  "RainmeterErrors": 0,
+  "UnprotectedControlRemoved": false
+}

@@ -88,11 +88,11 @@ bool AsyncLoader::Preview(UINT_PTR id, std::wstring& path, std::wstring& origina
     return true;
 }
 
-void AsyncLoader::DiscardPreview(std::wstring path)
+void AsyncLoader::DiscardPreview(std::wstring path, AnimationFileLock protection)
 {
     if (path.empty()) return;
     std::lock_guard<std::mutex> lock(mutex);
-    garbageFiles.push_back(std::move(path));
+    garbageFiles.push_back({std::move(path), std::move(protection)});
     condition.notify_one();
 }
 
@@ -120,7 +120,7 @@ void AsyncLoader::Run()
     for (;;)
     {
         std::vector<std::unique_ptr<Animation>> retired;
-        std::vector<std::wstring> retiredFiles;
+        std::vector<RetiredFile> retiredFiles;
         std::wstring path;
         UINT_PTR id;
         bool stop;
@@ -134,7 +134,7 @@ void AsyncLoader::Run()
             if (requested && !stop) path = source;
             requested = false;
         }
-        for (const auto& file : retiredFiles) DeleteFileW(file.c_str());
+        for (auto& file : retiredFiles) { file.protection.Reset(); DeleteFileW(file.path.c_str()); }
         retired.clear(); // Potentially thousands of DeleteFile calls, always off the UI thread.
         if (stop) return;
         if (path.empty()) continue;

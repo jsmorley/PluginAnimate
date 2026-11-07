@@ -69,10 +69,17 @@ $taskIni = Join-Path $taskRoot 'Rainmeter.ini'
 $taskSettings = "[Rainmeter]`r`nSkinPath=$taskSkinRoot\`r`nLogging=1`r`nUpdateCheck=0`r`n[MissingWeather]`r`nActive=1`r`nWindowX=-10000`r`nWindowY=-10000`r`nKeepOnScreen=0`r`n"
 [IO.File]::WriteAllText($taskIni,$taskSettings)
 # A separate settings file gives this test its own Rainmeter instance and log.
-$taskProcess = Start-Process -FilePath $Rainmeter -ArgumentList ('"' + $taskIni + '"') -WindowStyle Hidden -PassThru
+$taskTemp = Join-Path $taskRoot 'WindowsTemp'
+New-Item -ItemType Directory -Path $taskTemp -Force | Out-Null
+$taskLaunch = [Diagnostics.ProcessStartInfo]::new($Rainmeter)
+$taskLaunch.UseShellExecute = $false
+$taskLaunch.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+$taskLaunch.ArgumentList.Add($taskIni)
+$taskLaunch.Environment['TMP'] = $taskTemp
+$taskLaunch.Environment['TEMP'] = $taskTemp
+$taskProcess = [Diagnostics.Process]::Start($taskLaunch)
 try {
     if ($DeleteFrames) {
-        $taskTemp = Join-Path $taskSkin '@Resources\Temp'
         $taskDeadline = [DateTime]::UtcNow.AddSeconds(8)
         do {
             Start-Sleep -Milliseconds 20
@@ -82,34 +89,32 @@ try {
         $taskResolved = (Resolve-Path -LiteralPath $taskTemp).Path
         $taskAllowed = [IO.Path]::GetFullPath($taskRoot).TrimEnd('\') + '\'
         if (-not $taskResolved.StartsWith($taskAllowed,[StringComparison]::OrdinalIgnoreCase)) { throw 'Deletion target escaped isolated test directory.' }
-        try { Remove-Item -LiteralPath $taskResolved -Recurse -Force }
-        catch {
-            # Animate may finish deleting its own files while Remove-Item is
-            # enumerating them. Success still means the entire target is gone.
-            Start-Sleep -Milliseconds 100
-            if (Test-Path -LiteralPath $taskResolved) { throw }
+        $taskDeleteErrors = @()
+        Remove-Item -LiteralPath $taskResolved -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable taskDeleteErrors
+        if (-not $taskDeleteErrors.Count -or @(Get-ChildItem -LiteralPath $taskTemp -Recurse -Filter 'frame-*.bmp').Count -ne 8) {
+            throw 'Expected cleanup to be denied and all eight frames to remain.'
         }
     }
     if (-not $taskProcess.WaitForExit(20000)) { throw 'Isolated Rainmeter test did not finish.' }
     $taskLog = Join-Path $taskRoot 'Rainmeter.log'
     $taskErrors = @(Get-Content -LiteralPath $taskLog | Where-Object { $_ -match '^ERRO' -and $_ -match 'MissingWeather' })
-    $taskExpected = if ($DeleteFrames) { 1 } else { 3 }
+    $taskExpected = if ($DeleteFrames) { 0 } else { 3 }
     $taskPattern = if ($DeleteFrames) { 'Animate: Extracted frames are missing' } else { 'Animate: Cannot open animation file' }
     $taskResult = [PSCustomObject]@{
-        Version = '1.6.0'
+        Version = '1.8.0'
         SkinUpdateMilliseconds = 10
         SkinUpdates = 500
-        ExplicitStartCommands = $taskExpected
+        ExplicitStartCommands = if ($DeleteFrames) { 1 } else { 3 }
         ErrorsObserved = $taskErrors.Count
         OnlyExpectedErrors = @($taskErrors | Where-Object { $_ -notmatch $taskPattern }).Count -eq 0
-        ExternalTempDeletion = [bool]$DeleteFrames
+        DeletionAttemptBlocked = [bool]$DeleteFrames
     }
     $taskResult | ConvertTo-Json | Write-Output
     if ($taskErrors.Count -ne $taskExpected -or -not $taskResult.OnlyExpectedErrors) {
         $taskErrors | Write-Output
         throw 'Expected exactly one source error per Start and no Image meter errors.'
     }
-    $taskName = if ($DeleteFrames) { 'deleted-frames-results.json' } else { 'missing-source-results.json' }
+    $taskName = if ($DeleteFrames) { 'protected-frames-results.json' } else { 'missing-source-results.json' }
     $taskResult | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot $taskName) -Encoding utf8
 } finally {
     if (-not $taskProcess.HasExited) { Stop-Process -Id $taskProcess.Id }

@@ -185,63 +185,68 @@ UI thread, so frames may be skipped visually during a long skin update.
 Images are decoded once in the background, and Rainmeter loads the extracted BMP files
 for display. Large images or very short intervals can increase display work.
 
-Version **1.7.0** adds automatic recovery of crash-orphaned frame folders.
-
-Before each extraction, Animate checks this skin's `@Resources\Temp` for
-orphaned extraction folders left by a crash. New extraction folders contain
-an `.animate-owner` marker with a fixed signature held exclusively open for their entire
-lifetime. Windows releases that handle when the process terminates. Recovery
-requires a valid GUID folder name, the exact marker signature, and an available
-exclusive lock. Active extractions are preserved, including those owned by
-another Rainmeter process. Recovery never recurses or follows directory links;
-only generated `frame-<number>.bmp`, `loading.png`, and the marker are removed.
-Folders with unexpected contents or missing/invalid markers are left intact.
-Older unmarked extraction folders require manual cleanup. Recovery runs on the
-background extraction worker; skins that are never started are not scanned.
-
-Every extraction has a unique `#@#Temp\Rainmeter-Animate-{GUID}` folder, where
-`#@#` is Rainmeter's `@Resources` directory for the skin and `{GUID}` is a newly
-generated identifier. Animate creates `@Resources` and its `Temp` directory if
-they do not exist. This keeps active animation frames outside Windows Temp,
-where disk-cleaning utilities can remove them during playback.
-The skin's resource directory must be writable; a creation failure is reported
-once per explicit `Start` in Rainmeter's log, with no fallback to Windows Temp.
-Extracted frames are named
-`frame-0.bmp`, `frame-1.bmp`, `frame-2.bmp`, and so on. For example:
+Version **1.8.0** stores frames in the Windows temporary directory returned by
+`GetTempPathW`, normally `%TEMP%`. Each extraction has its own folder:
 
 ```text
-<Skin>\@Resources\Temp\Rainmeter-Animate-{GUID}\frame-0.bmp
+%TEMP%\Rainmeter-Animate-{GUID}\frame-0.bmp
 ```
 
-`loading.png` is the separate annotated first-frame preview in that same
-directory. It is discarded as soon as the full animation is ready.
+Frames are full-canvas, uncompressed 32-bit BMP V5 images with explicit alpha
+masks. The annotated first-frame preview is `loading.png` in the same folder.
+The skin's `@Resources` directory is no longer created or used for new frames.
 
-These are full-canvas, uncompressed 32-bit BMP V5 frames, including those
-extracted from APNG and WebP sources. The V5 header includes an explicit alpha mask,
-preserving transparency. Windows 8 or later is required for WIC BMP V5 alpha
-support. The single annotated loading preview remains a PNG.
-Each plugin measure owns a separate folder, even when measures use the same
-source. Changing the source deletes its old frames. Closing, unloading, or refreshing the skin calls
-`Finalize`, which stops playback, cancels extraction, and schedules deletion of
-its extracted frames and folder on the background worker. Cleanup finishes
-after the current codec operation reaches a cancellation checkpoint; the UI
-does not wait for it.
-Failed extractions also clean up their partial output. Only files created by
-this instance are deleted; cleanup does not recursively traverse directories.
-After removing its extraction folder, Animate removes `Temp` only if it is
-empty. Other measures' frames and unrelated files are preserved. The last
-measure's cleanup removes the empty `Temp` folder, and `@Resources` always
-remains. Source changes and extraction cancellation follow the same rules.
+Every generated frame and loading preview is protected by an open file handle.
+The handle permits readers such as Rainmeter but denies writing and deletion;
+normal delete, rename, overwrite, and recursive cleanup attempts fail while the
+animation needs the files. Protection starts when the file is created and is
+retained continuously through encoding and playback. Pausing or ending playback
+retains the frames for a later Start. There is no polling thread for these locks.
+The cost is one handle per frame, plus the preview and ownership marker.
 
-Version **1.5.0** moves extraction from Windows Temp to the skin resource
-directory. Directory creation and cleanup remain on the background worker;
-playback commands and frame timing are unchanged.
-Validation on November 6, 2026: x64 and Win32 regression tests passed, including
-concurrent extractions, shared `Temp` cleanup, unrelated-file preservation,
-source changes, cancellation, and the large GIF test. A fresh skin in running
-Rainmeter created its missing `@Resources`, extracted all eight WebP sample
-frames under `Temp`, and removed `Temp` on unload while retaining `@Resources`.
-See `tests/skin-storage-results.json` for the live storage check.
+The loading preview is unlocked and removed on the background worker after the
+Image meter has switched to a real frame. Source changes, refresh, and unloading
+release all remaining file handles and delete the extraction's own files and
+folder on that worker. Windows Temp itself is never removed. Cleanup never
+recursively traverses a user's directory or changes file permissions.
+
+These locks protect against ordinary file access, including normal elevated
+cleanup. They cannot protect against a tool that terminates Rainmeter, forcibly
+closes its handles, uses a kernel driver, or removes files after a reboot.
+Windows automatically releases the handles if Rainmeter exits or crashes.
+
+The crash recovery added in **1.7.0** is retained. Before extraction, Animate
+checks Windows Temp and the skin's legacy `@Resources\Temp` folder for marked,
+unlocked orphan extraction folders. Recovery requires a valid GUID folder name,
+the exact `.animate-owner` signature, and an available exclusive marker lock.
+It preserves active extractions, including those in other Rainmeter processes.
+Only generated frame files, `loading.png`, and the marker are removed; folders
+with unexpected contents, missing/invalid markers, or directory links are left
+alone. Legacy `@Resources` is preserved; its `Temp` folder is removed only when
+empty. Versions **1.5.0–1.7.0** used that skin-local storage location.
+
+Local 1.8.0 validation on November 6, 2026:
+
+- x64 and Win32 suites passed GIF/APNG/WebP decoding, protected WIC reads,
+  blocked delete/rename/overwrite attempts, preview protection, cancellation,
+  source switching, legacy orphan recovery, and the 235-frame GIF.
+- Thirty repeated extractions returned to their starting handle counts on
+  both architectures (108/108 on x64 and 126/126 on Win32 in that run).
+- In native Rainmeter, recursive cleanup attempts against an isolated test
+  Temp tree left all eight frames intact and produced zero Rainmeter errors
+  across 500 skin updates. All frame hashes remained unchanged.
+- Force-terminating only the isolated test process released its file locks;
+  restarting recovered the orphaned folder. Normal skin unload also released
+  the locks and removed the frames.
+
+Results are recorded in `tests/protected-frames-results.json`,
+`tests/cleaner-protection-results.json`, and `tests/protected-cleanup-results.json`.
+These are direct file-operation tests. In subsequent manual testing on
+November 6, 2026, the user ran FCleaner, Wise Disk Cleaner, Windows Disk Cleanup,
+and Microsoft PC Manager. All four completed without problems or warnings
+about the protected files and could not delete the active folders or frames.
+The user also confirmed that exiting Rainmeter normally cleaned them up and
+restarting Rainmeter recreated the frames.
 
 Large-file regression check (November 1, 2026): a 715 × 584 pixel `A.gif` with
 235 frames loaded in about **2.5–2.8 seconds**, with its annotated preview

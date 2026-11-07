@@ -21,18 +21,18 @@ def replace(old, new):
 replace('    Check(source->GetSize(&w, &h));', '    BenchTime timer(decodeMs);\n    Check(source->GetSize(&w, &h));')
 replace('    for (UINT y = 0; y < r.h; ++y)\n        for (UINT x = 0; x < r.w; ++x)\n        {',
         '    BenchTime timer(compositeMs);\n    for (UINT y = 0; y < r.h; ++y)\n        for (UINT x = 0; x < r.w; ++x)\n        {')
-replace('    ComPtr<IWICStream> stream;\n    Check(factory->CreateStream(&stream));',
-        '    BenchTime timer(saveMs);\n    ComPtr<IWICStream> stream;\n    Check(factory->CreateStream(&stream));')
+replace('    AnimationFileLock creating(',
+        '    BenchTime timer(saveMs);\n    AnimationFileLock creating(')
 replace('const std::function<bool()>& cancelled, bool bmp = false)',
         'const std::function<bool()>& cancelled)')
-replace('SaveImage(factory, path, canvas, w, h, cancelled, true);',
-        'SaveImage(factory, path, canvas, w, h, cancelled);')
-replace('    Bytes straight(canvas);\n    for (size_t i',
-        '    Bytes straight(canvas);\n    { BenchTime converting(convertMs);\n    for (size_t i')
+replace('SaveImage(factory, path, canvas, w, h, cancelled, true));',
+        'SaveImage(factory, path, canvas, w, h, cancelled));')
+replace('        Bytes straight(canvas);\n        for (size_t i',
+        '        Bytes straight(canvas);\n        { BenchTime converting(convertMs);\n        for (size_t i')
 replace('        if (straight[i + 3] == 255) continue;',
         '        if (fast && straight[i + 3] == 255) continue;')
-replace('    for (UINT row = 0; row < h; row += 32)',
-        '    }\n    BenchTime writing(writeMs);\n    for (UINT row = 0; row < h; row += 32)')
+replace('        for (UINT row = 0; row < h; row += 32)',
+        '        }\n        BenchTime writing(writeMs);\n        for (UINT row = 0; row < h; row += 32)')
 replace(' + L".bmp";', ' + (bmp ? L".bmp" : L".png");')
 
 prefix = '''#include <chrono>

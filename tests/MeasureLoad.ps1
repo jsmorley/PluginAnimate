@@ -20,7 +20,7 @@ public static class AnimateUiProbe {
 '@
 $window = [AnimateUiProbe]::FindWindow('DummyRainWClass', 'Rainmeter control window')
 if ($window -eq [IntPtr]::Zero) { throw 'Rainmeter control window not found.' }
-$tempRoot = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Rainmeter\Skins\Animate\@Resources\Temp'
+$tempRoot = [IO.Path]::GetTempPath()
 $before = @{}
 $wasActive = $false
 $inSection = $false
@@ -72,7 +72,7 @@ try {
     $result = [PSCustomObject]@{
         File = [IO.Path]::GetFileName($animationPath)
         FrameFormat = '32-bit BMP V5'
-        FrameStorage = 'Skin @Resources\Temp'
+        FrameStorage = 'Windows Temp; protected frame handles'
         ReadyMilliseconds = $readyMilliseconds
         DurationSeconds = $watch.Elapsed.TotalSeconds
         SuccessfulUiResponses = $responses.Count

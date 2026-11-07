@@ -42,7 +42,16 @@ void EnsureDirectory(const std::wstring& path)
     const DWORD attributes = GetFileAttributesW(path.c_str());
     Require(attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) &&
         !(attributes & FILE_ATTRIBUTE_REPARSE_POINT),
-        "Cannot create skin @Resources or Temp directory; check write permissions");
+        "Cannot access Windows temporary directory; check write permissions");
+}
+std::wstring WindowsTempRoot()
+{
+    wchar_t path[MAX_PATH + 1]{};
+    const DWORD length = GetTempPathW(MAX_PATH + 1, path);
+    if (!length || length > MAX_PATH - 70) return {};
+    std::wstring root(path, length);
+    while (root.size() > 3 && (root.back() == L'\\' || root.back() == L'/')) root.pop_back();
+    return root;
 }
 void Cancel(const std::function<bool()>& cancelled)
 {
@@ -121,52 +130,63 @@ void Composite(Bytes& canvas, UINT width, const Bytes& pixels, const Rect& r)
                 d[c] = r.blend ? BYTE(s[c] + (unsigned(d[c]) * (255 - s[3]) + 127) / 255) : s[c];
         }
 }
-void SaveImage(IWICImagingFactory* factory, const std::wstring& path, const Bytes& canvas, UINT w, UINT h,
+AnimationFileLock SaveImage(IWICImagingFactory* factory, const std::wstring& path, const Bytes& canvas, UINT w, UINT h,
     const std::function<bool()>& cancelled, bool bmp = false)
 {
     Cancel(cancelled);
-    ComPtr<IWICStream> stream;
-    Check(factory->CreateStream(&stream));
-    Check(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE));
-    ComPtr<IWICBitmapEncoder> encoder;
-    Check(factory->CreateEncoder(bmp ? GUID_ContainerFormatBmp : GUID_ContainerFormatPng, nullptr, &encoder));
-    Check(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache));
-    ComPtr<IWICBitmapFrameEncode> frame;
-    ComPtr<IPropertyBag2> properties;
-    Check(encoder->CreateNewFrame(&frame, &properties));
-    if (bmp)
+    // Protect from the moment the file exists. Permit the WIC writer while it
+    // encodes, then acquire a read-only lease before releasing this first one.
+    AnimationFileLock creating(CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+    Require(creating.value != INVALID_HANDLE_VALUE, "Cannot create protected frame file");
     {
-        // The V5 header carries explicit alpha masks; legacy BMP headers do not.
-        PROPBAG2 property{};
-        property.pstrName = const_cast<wchar_t*>(L"EnableV5Header32bppBGRA");
-        VARIANT value{};
-        value.vt = VT_BOOL;
-        value.boolVal = VARIANT_TRUE;
-        Check(properties->Write(1, &property, &value));
-    }
-    Check(frame->Initialize(properties.Get()));
-    Check(frame->SetSize(w, h));
-    WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
-    Check(frame->SetPixelFormat(&format));
-    Require(IsEqualGUID(format, GUID_WICPixelFormat32bppBGRA), "Image encoder does not support BGRA");
-    // Both encoders store straight alpha; fully opaque pixels already match it.
-    Bytes straight(canvas);
-    for (size_t i = 0; i < straight.size(); i += 4)
-    {
-        if (!(i & 65535)) Cancel(cancelled);
-        if (straight[i + 3] == 255) continue;
-        for (size_t c = 0; c < 3; ++c)
-            straight[i + c] = straight[i + 3] ? BYTE((std::min)(255u, (unsigned(straight[i + c]) * 255 + straight[i + 3] / 2) / straight[i + 3])) : 0;
-    }
-    for (UINT row = 0; row < h; row += 32)
-    {
+        ComPtr<IWICStream> stream;
+        Check(factory->CreateStream(&stream));
+        Check(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE));
+        ComPtr<IWICBitmapEncoder> encoder;
+        Check(factory->CreateEncoder(bmp ? GUID_ContainerFormatBmp : GUID_ContainerFormatPng, nullptr, &encoder));
+        Check(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache));
+        ComPtr<IWICBitmapFrameEncode> frame;
+        ComPtr<IPropertyBag2> properties;
+        Check(encoder->CreateNewFrame(&frame, &properties));
+        if (bmp)
+        {
+            // The V5 header carries explicit alpha masks; legacy BMP headers do not.
+            PROPBAG2 property{};
+            property.pstrName = const_cast<wchar_t*>(L"EnableV5Header32bppBGRA");
+            VARIANT value{};
+            value.vt = VT_BOOL;
+            value.boolVal = VARIANT_TRUE;
+            Check(properties->Write(1, &property, &value));
+        }
+        Check(frame->Initialize(properties.Get()));
+        Check(frame->SetSize(w, h));
+        WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
+        Check(frame->SetPixelFormat(&format));
+        Require(IsEqualGUID(format, GUID_WICPixelFormat32bppBGRA), "Image encoder does not support BGRA");
+        // Both encoders store straight alpha; fully opaque pixels already match it.
+        Bytes straight(canvas);
+        for (size_t i = 0; i < straight.size(); i += 4)
+        {
+            if (!(i & 65535)) Cancel(cancelled);
+            if (straight[i + 3] == 255) continue;
+            for (size_t c = 0; c < 3; ++c)
+                straight[i + c] = straight[i + 3] ? BYTE((std::min)(255u, (unsigned(straight[i + c]) * 255 + straight[i + 3] / 2) / straight[i + 3])) : 0;
+        }
+        for (UINT row = 0; row < h; row += 32)
+        {
+            Cancel(cancelled);
+            const UINT rows = (std::min)(32u, h - row);
+            Check(frame->WritePixels(rows, w * 4, rows * w * 4, straight.data() + size_t(row) * w * 4));
+        }
         Cancel(cancelled);
-        const UINT rows = (std::min)(32u, h - row);
-        Check(frame->WritePixels(rows, w * 4, rows * w * 4, straight.data() + size_t(row) * w * 4));
-    }
-    Cancel(cancelled);
-    Check(frame->Commit());
-    Check(encoder->Commit());
+        Check(frame->Commit());
+        Check(encoder->Commit());
+    } // Close all WIC write handles before denying further writes.
+    AnimationFileLock protection(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    Require(protection.value != INVALID_HANDLE_VALUE, "Cannot protect frame file");
+    return protection;
 }
 void Save(IWICImagingFactory* factory, Animation& output, const Bytes& canvas, UINT w, UINT h, const std::function<bool()>& cancelled)
 {
@@ -174,7 +194,7 @@ void Save(IWICImagingFactory* factory, Animation& output, const Bytes& canvas, U
         "Animation exceeds extraction limits (10000 frames / 1 GiB decoded pixels)");
     std::wstring path = output.directory + L"\\frame-" + std::to_wstring(output.frames.size()) + L".bmp";
     output.frames.push_back(path); // Track partial writes for cleanup too.
-    SaveImage(factory, path, canvas, w, h, cancelled, true);
+    output.frameLocks.push_back(SaveImage(factory, path, canvas, w, h, cancelled, true));
 }
 struct TextMask
 {
@@ -247,7 +267,7 @@ void MakePreview(IWICImagingFactory* factory, Animation& output, const Bytes& ca
         }
     }
     output.preview = output.directory + L"\\loading.png";
-    SaveImage(factory, output.preview, pixels, w, h, cancelled);
+    output.previewLock = SaveImage(factory, output.preview, pixels, w, h, cancelled);
 }
 UINT Metadata(IWICMetadataQueryReader* reader, const wchar_t* name, UINT fallback = 0)
 {
@@ -497,6 +517,8 @@ void Apng(IWICImagingFactory* factory, const Bytes& file, Animation& output, con
 
 Animation::~Animation()
 {
+    previewLock.Reset();
+    frameLocks.clear();
     if (!preview.empty()) DeleteFileW(preview.c_str());
     for (const auto& path : frames) DeleteFileW(path.c_str());
     std::lock_guard<std::mutex> lock(temporaryDirectoryMutex);
@@ -506,18 +528,16 @@ Animation::~Animation()
         if (!directory.empty()) DeleteFileW((directory + OwnerName).c_str());
     }
     if (!directory.empty()) RemoveDirectoryW(directory.c_str());
-    // Never recurse: other measures and unrelated files keep Temp in place.
-    if (!temporaryRoot.empty()) RemoveDirectoryW(temporaryRoot.c_str());
+    // Windows Temp belongs to Windows; remove only our unique extraction folder.
 }
 
-void CleanupOrphanAnimations(const std::wstring& resources)
+namespace
 {
-    if (resources.empty()) return;
-    std::wstring root = resources;
-    if (root.back() != L'\\' && root.back() != L'/') root += L'\\';
-    root += L"Temp";
+void CleanupOrphanRoot(const std::wstring& root, bool removeEmptyRoot)
+{
+    if (root.empty()) return;
     std::lock_guard<std::mutex> lock(temporaryDirectoryMutex);
-    if (!PlainDirectory(resources) || !PlainDirectory(root)) return;
+    if (!PlainDirectory(root)) return;
     WIN32_FIND_DATAW entry{};
     HANDLE search = FindFirstFileW((root + L"\\Rainmeter-Animate-*").c_str(), &entry);
     if (search == INVALID_HANDLE_VALUE) return;
@@ -573,8 +593,19 @@ void CleanupOrphanAnimations(const std::wstring& resources)
         if (DeleteFileW(owner.c_str())) RemoveDirectoryW(folder.c_str());
     } while (FindNextFileW(search, &entry));
     FindClose(search);
-    // Never recursively remove the shared Temp directory.
-    RemoveDirectoryW(root.c_str());
+    if (removeEmptyRoot) RemoveDirectoryW(root.c_str());
+}
+}
+
+void CleanupOrphanAnimations(const std::wstring& resources)
+{
+    CleanupOrphanRoot(WindowsTempRoot(), false);
+    // Also recover marked leftovers from versions 1.5 through 1.7 without
+    // creating @Resources or touching active older plugin instances.
+    if (resources.empty() || !PlainDirectory(resources)) return;
+    std::wstring legacy = resources;
+    if (legacy.back() != L'\\' && legacy.back() != L'/') legacy += L'\\';
+    CleanupOrphanRoot(legacy + L"Temp", true);
 }
 
 void ExtractAnimation(const std::wstring& path, const std::wstring& resources, Animation& output, const std::function<bool()>& cancelled,
@@ -607,20 +638,17 @@ void ExtractAnimation(const std::wstring& path, const std::wstring& resources, A
         }
     }
     Cancel(cancelled);
-    Require(!resources.empty(), "Cannot locate skin @Resources directory");
-    std::wstring root = resources;
-    if (root.back() != L'\\' && root.back() != L'/') root += L'\\';
-    root += L"Temp";
+    const std::wstring root = WindowsTempRoot();
+    Require(!root.empty(), "Cannot locate Windows temporary directory");
     GUID id;
     Check(CoCreateGuid(&id));
     wchar_t guid[40]; StringFromGUID2(id, guid, 40);
     const std::wstring directory = root + L"\\Rainmeter-Animate-" + guid;
     {
         std::lock_guard<std::mutex> lock(temporaryDirectoryMutex);
-        EnsureDirectory(resources);
         EnsureDirectory(root);
         output.temporaryRoot = root;
-        Require(CreateDirectoryW(directory.c_str(), nullptr) != FALSE, "Cannot create skin frame directory");
+        Require(CreateDirectoryW(directory.c_str(), nullptr) != FALSE, "Cannot create temporary frame directory");
         output.directory = directory;
         output.ownerFile = CreateFileW((directory + OwnerName).c_str(), GENERIC_READ | GENERIC_WRITE,
             0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);

@@ -1,0 +1,9 @@
+{
+  "Version": "1.8.0",
+  "SkinUpdateMilliseconds": 10,
+  "SkinUpdates": 500,
+  "ExplicitStartCommands": 1,
+  "ErrorsObserved": 0,
+  "OnlyExpectedErrors": true,
+  "DeletionAttemptBlocked": true
+}

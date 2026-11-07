@@ -74,6 +74,18 @@ std::vector<BYTE> ReadPixels(const std::wstring& path)
     Assert(SUCCEEDED(convert->CopyPixels(nullptr, w * 4, static_cast<UINT>(pixels.size()), pixels.data())), "Read pixels");
     return pixels;
 }
+void AssertProtected(const std::wstring& path)
+{
+    Assert(!ReadPixels(path).empty(), "Protected file remains readable through WIC");
+    Assert(!DeleteFileW(path.c_str()) && GetLastError() == ERROR_SHARING_VIOLATION, "Active file denies deletion");
+    Assert(!MoveFileW(path.c_str(), (path + L".renamed").c_str()) && GetLastError() == ERROR_SHARING_VIOLATION,
+        "Active file denies renaming");
+    HANDLE writer = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const DWORD failure = GetLastError();
+    if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
+    Assert(writer == INVALID_HANDLE_VALUE && failure == ERROR_SHARING_VIOLATION, "Active file denies overwriting");
+}
 void ExtractTestAnimation(const std::wstring& path, Animation& output, const std::function<bool()>& cancelled = {},
     const std::function<void(const Animation&)>& firstFrame = {})
 {
@@ -81,7 +93,9 @@ void ExtractTestAnimation(const std::wstring& path, Animation& output, const std
 }
 struct TestSkin
 {
-    std::filesystem::path skin, resources;
+    std::filesystem::path skin, resources, temporary;
+    std::wstring oldTemp, oldTmp;
+    bool hadTemp = false, hadTmp = false;
     TestSkin()
     {
         wchar_t executable[MAX_PATH]{};
@@ -92,9 +106,25 @@ struct TestSkin
         Assert(std::filesystem::create_directory(skin), "Create isolated test skin");
         resources = skin / L"@Resources";
         testResources = resources.wstring();
+        temporary = skin / L"WindowsTemp";
+        std::filesystem::create_directory(temporary);
+        auto save = [](const wchar_t* name, std::wstring& value) {
+            const DWORD length = GetEnvironmentVariableW(name, nullptr, 0);
+            if (!length) return GetLastError() != ERROR_ENVVAR_NOT_FOUND;
+            value.resize(length);
+            GetEnvironmentVariableW(name, value.data(), length);
+            value.resize(length - 1);
+            return true;
+        };
+        hadTemp = save(L"TEMP", oldTemp); hadTmp = save(L"TMP", oldTmp);
+        SetEnvironmentVariableW(L"TEMP", temporary.c_str());
+        SetEnvironmentVariableW(L"TMP", temporary.c_str());
     }
     ~TestSkin()
     {
+        SetEnvironmentVariableW(L"TEMP", hadTemp ? oldTemp.c_str() : nullptr);
+        SetEnvironmentVariableW(L"TMP", hadTmp ? oldTmp.c_str() : nullptr);
+        RemoveDirectoryW(temporary.c_str());
         RemoveDirectoryW(resources.c_str());
         RemoveDirectoryW(skin.c_str());
     }
@@ -119,6 +149,7 @@ int wmain(int argc, wchar_t** argv)
             const std::filesystem::path stale = orphan.directory;
             // Model process termination: Windows releases the owner handle,
             // but the Animation destructor never gets to remove its files.
+            orphan.frameLocks.clear(); orphan.previewLock.Reset();
             CloseHandle(orphan.ownerFile);
             orphan.ownerFile = INVALID_HANDLE_VALUE;
             orphan.directory.clear(); orphan.temporaryRoot.clear();
@@ -149,7 +180,7 @@ int wmain(int argc, wchar_t** argv)
             std::filesystem::remove(legacy);
         }
         {
-            const auto temp = testSkin.resources / L"Temp";
+            const auto temp = testSkin.temporary;
             std::array<std::unique_ptr<Animation>, 2> animations;
             std::array<std::exception_ptr, 2> failures;
             std::array<std::thread, 2> workers;
@@ -164,15 +195,15 @@ int wmain(int argc, wchar_t** argv)
                 });
             for (auto& worker : workers) worker.join();
             for (const auto& failure : failures) if (failure) std::rethrow_exception(failure);
-            Assert(std::filesystem::is_directory(testSkin.resources) && std::filesystem::is_directory(temp),
-                "Creates missing @Resources and Temp inside the skin");
+            Assert(!std::filesystem::exists(testSkin.resources) && std::filesystem::is_directory(temp),
+                "Uses Windows Temp without creating skin resources");
             Assert(std::filesystem::path(animations[0]->directory).parent_path() == temp &&
-                animations[0]->directory != animations[1]->directory, "Concurrent measures use isolated skin frame folders");
+                animations[0]->directory != animations[1]->directory, "Concurrent measures use isolated Windows Temp frame folders");
             animations[0].reset();
             Assert(std::filesystem::exists(animations[1]->frames[0]), "One measure's cleanup preserves another measure's frames");
             animations[1].reset();
-            Assert(!std::filesystem::exists(temp) && std::filesystem::is_directory(testSkin.resources),
-                "Last extraction removes empty Temp but leaves @Resources");
+            Assert(std::filesystem::is_directory(temp) && std::filesystem::is_empty(temp),
+                "Last extraction removes its folder but preserves Windows Temp");
             std::filesystem::create_directory(temp);
             const auto unrelated = temp / L"unrelated.txt";
             { std::ofstream file(unrelated); file << "Keep this file"; }
@@ -185,15 +216,34 @@ int wmain(int argc, wchar_t** argv)
             std::filesystem::remove(temp);
             const auto blocked = testSkin.skin / L"blocked-resources";
             { std::ofstream file(blocked); file << "Not a directory"; }
-            bool rejected = false;
-            try
             {
                 Animation animation;
                 ExtractAnimation(fixture(L"blend.webp"), blocked.wstring(), animation);
+                Assert(std::filesystem::path(animation.directory).parent_path() == temp,
+                    "Extraction does not require writable skin resources");
             }
-            catch (const std::runtime_error&) { rejected = true; }
-            Assert(rejected && !std::filesystem::exists(temp), "Unwritable resource location fails without Windows Temp fallback");
             std::filesystem::remove(blocked);
+        }
+        std::filesystem::create_directory(testSkin.resources);
+        {
+            const auto legacyRoot = testSkin.resources / L"Temp";
+            const auto legacy = legacyRoot / L"Rainmeter-Animate-{00000000-0000-0000-0000-000000000002}";
+            std::filesystem::create_directories(legacy);
+            { std::ofstream file(legacy / L".animate-owner", std::ios::binary); file << "Rainmeter Animate extraction owner v1\r\n"; }
+            { std::ofstream file(legacy / L"frame-0.bmp"); file << "Legacy generated data"; }
+            CleanupOrphanAnimations(testResources);
+            Assert(!std::filesystem::exists(legacyRoot) && std::filesystem::exists(testSkin.resources),
+                "Windows Temp migration also cleans marked legacy skin folders and keeps resources");
+        }
+        {
+            // Warm the Windows codecs before checking repeated extraction leases.
+            { Animation warm; ExtractTestAnimation(fixture(L"blend.webp"), warm); }
+            DWORD before = 0, after = 0;
+            Assert(GetProcessHandleCount(GetCurrentProcess(), &before) != FALSE, "Read handle count before stress test");
+            for (int i = 0; i < 30; ++i) { Animation animation; ExtractTestAnimation(fixture(L"blend.webp"), animation); }
+            Assert(GetProcessHandleCount(GetCurrentProcess(), &after) != FALSE && after <= before + 2,
+                "Repeated extraction and cleanup do not leak file handles");
+            std::cout << "Frame-lock stress: handles before " << before << "; after " << after << "\n";
         }
         for (const auto* name : {L"blend.apng", L"poster.png", L"disposal.gif"})
         {
@@ -202,6 +252,7 @@ int wmain(int argc, wchar_t** argv)
                 Animation animation;
                 ExtractTestAnimation(fixture(name), animation);
                 dir = animation.directory;
+                for (const auto& frame : animation.frames) AssertProtected(frame);
                 Assert(animation.frames.size() == 4, "Frame count / APNG poster exclusion");
                 Assert(std::filesystem::path(animation.frames[0]).extension() == L".bmp", "Animation frames use BMP files");
                 Assert(animation.delays == (std::wstring(name) == L"disposal.gif" ? std::vector<UINT>{100,250,10,330} : std::vector<UINT>{100,250,10,333}),
@@ -253,6 +304,8 @@ int wmain(int argc, wchar_t** argv)
                 "WebP millisecond timing, zero-delay minimum, frame count");
             Assert(ReadPixels(webp.frames[0]) == std::vector<BYTE>({0,0,255,255,0,0,255,255,0,0,255,255,0,0,255,255}),
                 "WebP first full canvas");
+            for (const auto& frame : webp.frames) AssertProtected(frame);
+            AssertProtected(webp.preview);
             const auto mixed = ReadPixels(webp.frames[1]);
             Assert(mixed[0] == 128 && mixed[2] == 127 && mixed[3] == 255 && mixed[8] == 0 && mixed[10] == 255,
                 "WebP OVER blends partial alpha and retains uncovered canvas");
@@ -310,6 +363,8 @@ int wmain(int argc, wchar_t** argv)
             std::vector<BYTE> original;
             ExtractTestAnimation(L"examples/Animate/@Resources/Loading.gif", previewed, {}, [&](const Animation& first) {
                 Assert(first.frames.size() == 1 && !first.preview.empty(), "Preview is published with only the first frame extracted");
+                AssertProtected(first.frames[0]);
+                AssertProtected(first.preview);
                 original = ReadPixels(first.frames[0]);
                 const auto annotated = ReadPixels(first.preview);
                 Assert(original != annotated && std::equal(original.begin(), original.begin() + 4, annotated.begin()),
@@ -494,8 +549,8 @@ int wmain(int argc, wchar_t** argv)
         Finalize(data);
         Until([&] { return cleanup.expired(); }, "Background cleanup completes");
         Assert(!std::filesystem::exists(finalDir), "Finalize removes temporary folder");
-        Assert(!std::filesystem::exists(testSkin.resources / L"Temp") && std::filesystem::is_directory(testSkin.resources),
-            "Finalize removes empty skin Temp and retains @Resources");
+        Assert(std::filesystem::is_empty(testSkin.temporary) && std::filesystem::is_directory(testSkin.resources),
+            "Finalize removes generated folders while preserving Windows Temp and skin resources");
         Pump(60); // Pending timer messages after finalization must be harmless.
         Assert(errors.empty(), "No unexpected plugin errors");
         // Weather skins can issue Start on refresh before WebParser supplies an
@@ -562,27 +617,15 @@ int wmain(int argc, wchar_t** argv)
             m = static_cast<Measure*>(data);
             Reload(data, &options, &maximum);
             ExecuteBang(data, L"start");
-            Until([&] { return !m->loading; }, "External-deletion test starts playback");
-            const auto temp = testSkin.resources / L"Temp";
-            Assert(temp.parent_path() == testSkin.resources && std::filesystem::exists(temp), "Deletion target is inside the isolated test skin");
-            // The live ownership marker deliberately prevents deleting the whole
-            // folder. Frames themselves remain externally deletable.
-            for (const auto& frame : m->animation->frames) std::filesystem::remove(frame);
-            Assert(Update(data) == 0 && !m->playing && !m->animation && errors.size() == 1,
-                "Skin update detects external deletion without waiting for the 30-second timer");
-            Assert(commands.back().find(L"ImageName \"\"") != std::wstring::npos, "External deletion clears the Image meter");
-            for (int i = 0; i < 50; ++i) { Reload(data, &options, &maximum); Update(data); Pump(1); }
-            Assert(errors.size() == 1 && !m->loading, "Deleted frames do not trigger retries or repeated errors");
-            ExecuteBang(data, L"start");
-            Until([&] { return !m->loading; }, "Start rebuilds externally deleted frames");
-            Assert(m->playing && m->animation && errors.size() == 1, "Rebuild succeeds without a stale error");
-            for (const auto& frame : m->animation->frames) std::filesystem::remove(frame);
-            m->Show();
-            Assert(!m->playing && errors.size() == 2, "Frame presentation also catches external deletion once per Start");
+            Until([&] { return !m->loading; }, "Protected-frame test starts playback");
+            for (const auto& frame : m->animation->frames) AssertProtected(frame);
+            const auto folder = m->animation->directory;
+            Assert(!RemoveDirectoryW(folder.c_str()), "Active frame folder cannot be removed");
+            Assert(Update(data) == 30000 && m->playing && errors.empty(), "Deletion attempts leave playback healthy");
             cleanup = m->loader;
             Finalize(data);
-            Until([&] { return cleanup.expired(); }, "External-deletion cleanup completes");
-            errors.clear();
+            Until([&] { return cleanup.expired(); }, "Protected-frame cleanup completes");
+            Assert(!std::filesystem::exists(folder), "Unload closes locks and deletes frames");
         }
         if (argc == 3 && std::wstring(argv[1]) == L"--large")
         {

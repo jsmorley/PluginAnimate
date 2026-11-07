@@ -1,0 +1,15 @@
+{
+  "Version": "1.8.0",
+  "Date": "2026-11-06",
+  "Verification": "User-reported manual testing",
+  "Cleaners": [
+    "FCleaner",
+    "Wise Disk Cleaner",
+    "Windows Disk Cleanup",
+    "Microsoft PC Manager"
+  ],
+  "AllCompletedWithoutReportedProblems": true,
+  "ProtectedFoldersAndFilesSurvived": true,
+  "NormalRainmeterExitRemovedFrames": true,
+  "RainmeterRestartRecreatedFrames": true
+}
