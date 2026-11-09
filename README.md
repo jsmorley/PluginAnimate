@@ -4,10 +4,19 @@ Native C++ Rainmeter plugin for animated GIF, APNG, and WebP files. Frames are d
 once into 32-bit BMP V5 files with alpha; a normal `Meter=Image` displays them. No external codec, command
 line program, or C++ runtime installation is required.
 
+Version **1.9.0** defers animation initialization until the first explicit `Start`. Before then, it does not
+read or cache its options or filename, create playback/extraction workers, open
+files, or update the Image meter. Every `Start` reads the **current** options and
+resolves references such as `[MeasureIcon]` immediately, even without
+`DynamicVariables=1`.
+
 For a comparison of image formats, see SVGator's
 [GIF vs PNG vs JPEG vs WebP image formats guide](https://www.svgator.com/blog/gif-vs-png-jpeg-webp-image-formats-guide/).
 
 ```ini
+[Rainmeter]
+OnRefreshAction=[!CommandMeasure MeasureAnimate "Start"]
+
 [MeasureAnimate]
 Measure=Plugin
 Plugin=Animate
@@ -15,7 +24,6 @@ ImageName=#@#Loading.gif
 MeterName=MeterAnimation
 Speed=0
 Loop=-1
-DynamicVariables=1
 
 [MeterAnimation]
 Meter=Image
@@ -92,14 +100,19 @@ invalid, or undecodable animation produces **one error per explicit `Start`**.
 After failure, Animate stops playback and waits: skin updates and playback
 timers do not retry the failed source. A new `Start` retries it once, allowing
 a repaired file at the same path to load. A changed `ImageName` loads the new
-source normally. Background prefetch failures without a `Start` stay silent.
+source normally. After activation, background source-change failures without a
+new `Start` stay silent.
 The Image meter is cleared when changing sources or when extraction fails, so
 it does not keep trying to display deleted temporary frames.
 
-For weather skins, a refresh-time `Start` can arrive before WebParser has an
-icon code, leaving an empty filename or `.webp`. That logs once and preserves
-the playback request. When WebParser supplies a valid path, Animate loads and
-plays it automatically. `End` cancels that pending request.
+For weather skins, put `FinishAction=[!CommandMeasure MeasureAnimate "Start"]`
+on the WebParser parent. That single command reads the newly parsed icon code;
+no child WebParser updates, initially disabled Animate measure, or
+`DynamicVariables=1` are required. Do not issue an earlier refresh-time `Start`
+if the filename depends on data that has not arrived yet. An explicit `Start`
+with an empty or invalid filename still reports a source error. If dynamic
+updates are enabled, a later valid source can resume a pending Start;
+`End` cancels that pending request.
 
 If extracted frames are deleted externally while the skin is running,
 Animate detects the missing current frame on its next display or measure
@@ -148,7 +161,9 @@ See [sample attribution](examples/Animate/@Resources/SOURCES.md).
 
 With `DynamicVariables=1`, Rainmeter rereads options on measure updates. After
 changing variables or options, use `!UpdateMeasure MeasureAnimate` to apply them
-immediately. A new source is extracted and reset to frame 0, retaining whether
+immediately after the first Start. This is optional for changes between Start
+commands; `Start` itself always rereads the current options. A new source is
+extracted and reset to frame 0, retaining whether
 playback was running or paused. Changing Speed restarts the current interval;
 changing Loop keeps the current position and number of completed repeats.
 Changing the source filename or refreshing the skin also allows retrying a
@@ -161,7 +176,7 @@ without polling. Commands and dynamic options wake it through a condition
 variable. Finalization wakes and joins this playback worker promptly.
 
 Extraction and temporary-file deletion run on a separate background worker at
-below-normal thread priority. `Reload` queues a source request and returns
+below-normal thread priority. After the first Start, `Reload` queues a source request and returns
 without reading or decoding the animation. The extraction worker never holds
 the playback/UI mutex while decoding or writing frames. Changing sources cancels
 the old request; stale results and errors are discarded. Codec operations,
@@ -282,11 +297,22 @@ plugin SDK's `C++` directory: the plugin references the local SDK at
 `../../API/RainmeterAPI.h` and its matching `API/x64` or `API/x32` library.
 The SDK is not bundled.
 
+After building both architectures and copying their DLLs into `Releases/x64`
+and `Releases/x32`, run `python tools/PackageRelease.py` to build and verify the
+versioned RMSKIN in `output/release`. `--output` selects another destination.
+The installer includes both plugin architectures, the Animate example and its
+three sample formats, documentation and license notices. Minimum Rainmeter is 4.5.
+
 The included libwebp **1.6.0** decoder sources compile directly into `Animate.dll`
 through `third_party/WebP.props`; no additional dependency setup is required.
 Its provenance and license notices are in [third_party](third_party/README.md).
 Binary distributions must retain the libwebp notices provided in
 `Releases/WEBP-NOTICES.txt`.
+
+The 1.9.0 startup regression verifies no option reads, cached filenames, workers or
+meter updates before Start. The native `tests/VerifyWebParserStart.ps1` test
+checks two parent WebParser downloads with a Start-only FinishAction, no child
+updates and no DynamicVariables.
 
 `tests/Tests.vcxproj` exercises GIF/APNG/WebP pixels, timing, transparency,
 blending/disposal, cancellation, malformed inputs, playback commands, and cleanup.

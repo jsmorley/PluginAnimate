@@ -42,6 +42,8 @@ struct Measure
     bool loading = false;
     bool startWhenReady = false;
     bool displayLoading = false;
+    bool started = false;
+    bool displayed = false;
     uint64_t pendingStarts = 0;
     bool frameErrorAllowed = false;
     UINT_PTR loadRevision = 0;
@@ -109,10 +111,12 @@ struct Measure
             const std::wstring image = animation ? animation->frames[index] : (displayLoading ? preview : originalPreview);
             // An empty image actively clears a previous frame. Leaving a deleted
             // frame path on the meter makes Rainmeter log on every skin update.
-            if (!meter.empty())
+            if (!meter.empty() && (!image.empty() || displayed))
+            {
                 command = L"[!SetOption \"" + meter + L"\" ImageName \"" + image + L"\"][!UpdateMeter \"" + meter + L"\"]";
-            if (command.empty()) return;
-            command += L"[!Redraw]";
+                displayed = !image.empty();
+                command += L"[!Redraw]";
+            }
             // RmExecute is synchronous. This posted message runs after the meter
             // has stopped using the old paths, keeping deletion off the UI thread.
             if (!retired.empty() || (animation && !animation->preview.empty()))
@@ -120,7 +124,7 @@ struct Measure
         }
         if (!error.empty()) RmLog(rm, LOG_ERROR, error.c_str());
         // Execute last: meter actions can refresh/unload this measure during RmExecute.
-        RmExecute(skin, command.c_str());
+        if (!command.empty()) RmExecute(skin, command.c_str());
     }
     void Loaded(UINT_PTR revision, LPARAM stage)
     {
@@ -231,41 +235,49 @@ bool SafeArgument(const std::wstring& text)
 {
     return text.find_first_of(L"\"\r\n[]") == std::wstring::npos;
 }
-}
-
-PLUGIN_EXPORT void Initialize(void** data, void* rm)
+bool StartRuntime(Measure& measure)
 {
-    auto measure = std::make_unique<Measure>();
-    measure->rm = rm;
-    measure->skin = RmGetSkin(rm);
-    const auto name = ClassName(measure.get());
+    measure.skin = RmGetSkin(measure.rm);
+    const auto name = ClassName(&measure);
     WNDCLASSW wc{};
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = Module();
     wc.lpszClassName = name.c_str();
-    if (RegisterClassW(&wc))
-        measure->window = CreateWindowExW(0, name.c_str(), L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, measure.get());
-    if (!measure->window) RmLog(rm, LOG_ERROR, L"Animate: Cannot create display message window.");
-    else
+    if (!measure.window && (RegisterClassW(&wc) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS))
+        measure.window = CreateWindowExW(0, name.c_str(), L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, &measure);
+    if (!measure.window)
     {
-        try
-        {
-            // Resolve Rainmeter's skin resource directory on the UI thread only.
-            std::wstring resources = RmReplaceVariables(rm, L"#@#");
-            measure->loader = AsyncLoader::Create(measure->window, LoadMessage, std::move(resources));
-            measure->worker = std::thread(&Measure::Run, measure.get());
-        }
-        catch (const std::exception&)
-        {
-            RmLog(rm, LOG_ERROR, L"Animate: Cannot create background workers.");
-        }
+        RmLog(measure.rm, LOG_ERROR, L"Animate: Cannot create display message window.");
+        return false;
     }
+    try
+    {
+        if (!measure.loader)
+            measure.loader = AsyncLoader::Create(measure.window, LoadMessage, RmReplaceVariables(measure.rm, L"#@#"));
+        if (!measure.worker.joinable()) measure.worker = std::thread(&Measure::Run, &measure);
+    }
+    catch (const std::exception&)
+    {
+        RmLog(measure.rm, LOG_ERROR, L"Animate: Cannot create background workers.");
+        return false;
+    }
+    return true;
+}
+}
+
+PLUGIN_EXPORT void Initialize(void** data, void* rm)
+{
+    // Rainmeter requires a measure object; all options, runtime workers and file
+    // activity are deferred until the first explicit Start.
+    auto measure = std::make_unique<Measure>();
+    measure->rm = rm;
     *data = measure.release();
 }
 
 PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
 {
     auto& m = *static_cast<Measure*>(data);
+    if (!m.started) { *maxValue = 0.0; return; }
     std::unique_lock<std::mutex> lock(m.mutex);
     bool show = false;
     std::wstring raw = RmReadString(rm, L"ImageName", L"");
@@ -311,6 +323,7 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
 PLUGIN_EXPORT double Update(void* data)
 {
     auto& m = *static_cast<Measure*>(data);
+    if (!m.started) return 0.0;
     std::unique_lock<std::mutex> lock(m.mutex);
     std::wstring error;
     if (!m.ValidateFrame(error))
@@ -326,13 +339,26 @@ PLUGIN_EXPORT double Update(void* data)
 
 PLUGIN_EXPORT LPCWSTR GetString(void* data)
 {
-    // Source changes only on the UI thread in Reload; the worker never modifies it.
+    // Source is empty before Start and is only read/refreshed on the UI thread.
     return static_cast<Measure*>(data)->source.c_str();
 }
 
 PLUGIN_EXPORT void ExecuteBang(void* data, LPCWSTR args)
 {
     auto& m = *static_cast<Measure*>(data);
+    if (_wcsicmp(args, L"start") == 0)
+    {
+        if (!m.started)
+        {
+            if (!StartRuntime(m)) return;
+            m.started = true;
+        }
+        // Read and resolve the current options for every Start, even when
+        // DynamicVariables is absent and the host has not called Reload again.
+        double maximum = 0;
+        Reload(data, m.rm, &maximum);
+    }
+    else if (!m.started) return;
     std::unique_lock<std::mutex> lock(m.mutex);
     if (_wcsicmp(args, L"start") == 0)
     {

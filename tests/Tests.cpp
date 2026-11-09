@@ -18,16 +18,19 @@
 enum { LOG_ERROR = 1, LOG_WARNING = 2 };
 std::map<std::wstring, std::wstring> options;
 std::vector<std::wstring> commands, errors;
+size_t optionReads = 0;
 std::wstring testResources;
 void* RmGetSkin(void* rm) { return rm; }
 double RmReadDouble(void* rm, LPCWSTR name, double value) { return RmReadFormula(rm, name, value); }
 LPCWSTR __stdcall RmReadString(void*, LPCWSTR key, LPCWSTR fallback, BOOL)
 {
+    ++optionReads;
     auto found = options.find(key);
     return found == options.end() ? fallback : found->second.c_str();
 }
 double __stdcall RmReadFormula(void*, LPCWSTR key, double fallback)
 {
+    ++optionReads;
     auto found = options.find(key);
     return found == options.end() ? fallback : std::stod(found->second);
 }
@@ -389,6 +392,38 @@ int wmain(int argc, wchar_t** argv)
             Assert(cancelled && !std::filesystem::exists(cancelledDir), "Cancelled extraction removes partial frame output");
         }
 
+        {
+            options = {{L"ImageName",(testSkin.resources / L".webp").wstring()},{L"MeterName",L"DeferredImage"},{L"Loop",L"-1"}};
+            void* deferred = nullptr; double deferredMaximum = -1;
+            const auto reads = optionReads, displays = commands.size();
+            Initialize(&deferred, &options);
+            auto* idle = static_cast<Measure*>(deferred);
+            for (int i = 0; i < 20; ++i) { Reload(deferred, &options, &deferredMaximum); Update(deferred); Pump(1); }
+            ExecuteBang(deferred, L"pause");
+            ExecuteBang(deferred, L"end");
+            Assert(!idle->started && !idle->window && !idle->loader && !idle->worker.joinable() &&
+                idle->source.empty() && idle->meter.empty() && optionReads == reads && commands.size() == displays &&
+                std::wstring(GetString(deferred)).empty() && deferredMaximum == 0 && errors.empty(),
+                "Before Start: no options, cached source, workers, file activity, meter updates or errors");
+            // WebParser finishes between host updates. Start must read the new
+            // value itself; there is no Reload or DynamicVariables in this case.
+            options[L"ImageName"] = fixture(L"blend.webp");
+            ExecuteBang(deferred, L"start");
+            Assert(idle->started && idle->loading && commands.size() == displays,
+                "Start initializes lazily without updating an empty meter");
+            Until([&] { return !idle->loading; }, "Deferred source loads");
+            Assert(idle->animation && idle->playing && idle->source == fixture(L"blend.webp") && errors.empty(),
+                "First Start resolves the current source without a preceding Reload");
+            options[L"ImageName"] = fixture(L"blend.apng");
+            options[L"Speed"] = L"75";
+            ExecuteBang(deferred, L"start");
+            Until([&] { return !idle->loading; }, "Second Start loads updated options");
+            Assert(idle->animation && idle->playing && idle->source == fixture(L"blend.apng") && Update(deferred) == 75,
+                "Every Start rereads current source and options without DynamicVariables");
+            std::weak_ptr<AsyncLoader> deferredCleanup = idle->loader;
+            Finalize(deferred);
+            Until([&] { return deferredCleanup.expired(); }, "Deferred-start resources clean up");
+        }
         options = {{L"ImageName",fixture(L"blend.apng")},{L"MeterName",L"Image"},{L"Speed",L"20"},{L"Loop",L"0"}};
         void* data = nullptr; double maximum = 0;
         Initialize(&data, &options);
@@ -564,7 +599,7 @@ int wmain(int argc, wchar_t** argv)
             ExecuteBang(data, L"start");
             Until([&] { return !m->loading; }, "Invalid weather source completes its load attempt");
             Assert(errors.size() == 1 && !m->playing && m->startWhenReady, "Refresh Start logs one error and waits for a valid icon");
-            Assert(commands.back().find(L"ImageName \"\"") != std::wstring::npos, "Failed load clears stale Image meter paths");
+            Assert(!m->displayed, "Failed first load does not display or update an empty meter");
             const auto revision = m->loadRevision;
             const auto failedCommands = commands.size();
             for (int i = 0; i < 50; ++i) { Reload(data, &options, &maximum); Update(data); Pump(1); }
@@ -601,7 +636,7 @@ int wmain(int argc, wchar_t** argv)
             m = static_cast<Measure*>(data);
             Reload(data, &options, &maximum);
             Until([&] { return !m->loading; }, "Unstarted failed source finishes silently");
-            Assert(errors.empty(), "Prefetch failure without Start does not log");
+            Assert(!m->started && !m->loader && errors.empty(), "No prefetch or errors before Start");
             std::filesystem::copy_file(fixture(L"blend.webp"), repair);
             ExecuteBang(data, L"start");
             Until([&] { return !m->loading; }, "Repaired source reloads on Start");
@@ -635,6 +670,7 @@ int wmain(int argc, wchar_t** argv)
             const auto began = GetTickCount64();
             const auto beganPrecise = std::chrono::steady_clock::now();
             Reload(data, &options, &maximum);
+            ExecuteBang(data, L"start");
             const auto reloadMs = GetTickCount64() - began;
             const auto reloadPreciseMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - beganPrecise).count();
             Assert(reloadMs < 500 && m->loading, "Large GIF Reload returns immediately");

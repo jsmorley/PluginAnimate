@@ -101,7 +101,7 @@ try {
     $taskExpected = if ($DeleteFrames) { 0 } else { 3 }
     $taskPattern = if ($DeleteFrames) { 'Animate: Extracted frames are missing' } else { 'Animate: Cannot open animation file' }
     $taskResult = [PSCustomObject]@{
-        Version = '1.8.0'
+        Version = (Get-Item -LiteralPath $Plugin).VersionInfo.FileVersion
         SkinUpdateMilliseconds = 10
         SkinUpdates = 500
         ExplicitStartCommands = if ($DeleteFrames) { 1 } else { 3 }
