@@ -416,6 +416,28 @@ int wmain(int argc, wchar_t** argv)
                 ReadPixels(first.frames.front()) == ReadPixels(full.frames.front()) && first.delays.front() == full.delays.front(),
                 "Frame-only extraction preserves GIF/APNG/WebP composition and metadata without later frames or loading preview");
         }
+        for (bool cancelStart : {false, true})
+        {
+            options = {{L"ImageName",fixture(L"blend.webp")},{L"MeterName",L"EarlyStartImage"},{L"Loop",L"-1"}};
+            void* early = nullptr;
+            Initialize(&early, &options);
+            auto* idle = static_cast<Measure*>(early);
+            const auto revision = idle->loadRevision;
+            ExecuteBang(early, L"Start");
+            Assert(idle->loading && idle->startWhenReady && idle->loadRevision == revision,
+                "Start during preloading keeps the same extraction and queues playback");
+            ExecuteBang(early, L"Pause");
+            Assert(!idle->startWhenReady && idle->paused, "Pause cancels queued playback");
+            ExecuteBang(early, L"PauseResume");
+            Assert(idle->startWhenReady, "PauseResume restores queued playback");
+            if (cancelStart) ExecuteBang(early, L"End");
+            Until([&] { return !idle->loading; }, "Preloading finishes with a pending or cancelled Start");
+            Assert(idle->animation && idle->loadRevision == revision && idle->playing == !cancelStart && idle->index == 0,
+                "Pending Start plays on completion; End cancels it without restarting extraction");
+            auto cleanup = std::weak_ptr<AsyncLoader>(idle->loader);
+            Finalize(early);
+            Until([&] { return cleanup.expired(); }, "Early Start cleanup finishes");
+        }
         for (const auto* hostFlag : {L"Disabled", L"Paused"})
         {
             options = {{hostFlag,L"1"},{L"ImageName",fixture(L"blend.webp")},{L"MeterName",L"DisabledImage"},{L"Loop",L"-1"}};
@@ -454,17 +476,18 @@ int wmain(int argc, wchar_t** argv)
             Assert(optionReads > reads && idle->loading && !idle->started && idle->meter == L"PrefetchImage" &&
                 idle->speed == 75 && idle->loop == -1 && idle->displayLoading, "Creation reads all options and starts asynchronous prefetch");
             Until([&] { return !idle->loading; }, "Creation-time prefetch finishes");
-            Assert(idle->animation && idle->animation->firstFrameOnly && idle->animation->frames.size() == 1 && idle->index == 0 && !idle->playing && commands.size() == displays + 1 &&
-                commands.back().find(L"frame-0.bmp") != std::wstring::npos,
-                "Completed prefetch displays only the real first frame, even with DisplayLoading enabled");
+            Assert(idle->animation && !idle->animation->firstFrameOnly && idle->animation->frames.size() == 4 && idle->index == 0 && !idle->playing && commands.size() >= displays + 2 &&
+                commands[displays].find(L"loading.png") != std::wstring::npos && commands.back().find(L"frame-0.bmp") != std::wstring::npos,
+                "Creation shows the loading preview, then leaves the real first frame with all frames extracted");
+            const auto prefetchedDisplays = commands.size();
             Pump(120);
-            Assert(idle->index == 0 && commands.size() == displays + 1 && Update(prefetch) == 75,
+            Assert(idle->index == 0 && commands.size() == prefetchedDisplays && Update(prefetch) == 75,
                 "Prefetched frame remains still until Start");
+            const auto revision = idle->loadRevision;
+            const auto* cached = idle->animation.get();
             ExecuteBang(prefetch, L"start");
-            Assert(idle->loading && !idle->playing, "Start promotes first-frame prefetch to full extraction");
-            Until([&] { return !idle->loading; }, "Start completes full extraction");
-            Assert(idle->playing && idle->animation->frames.size() == 4 && !idle->animation->firstFrameOnly,
-                "Full extraction starts playback after first-frame-only prefetch");
+            Assert(idle->playing && !idle->loading && idle->index == 0 && idle->loadRevision == revision && idle->animation.get() == cached,
+                "Start plays cached frames immediately without re-extracting");
             std::weak_ptr<AsyncLoader> prefetchCleanup = idle->loader;
             Finalize(prefetch);
             Until([&] { return prefetchCleanup.expired(); }, "Prefetch cleanup completes");
@@ -562,12 +585,8 @@ int wmain(int argc, wchar_t** argv)
             Initialize(&corrupt, &options);
             auto* idle = static_cast<Measure*>(corrupt);
             Until([&] { return !idle->loading; }, "Existing corrupt variable input fails prefetch");
-            Assert(errors.empty() && idle->animation && idle->animation->frames.size() == 1,
-                "A damaged later frame is not decoded during first-frame prefetch");
-            ExecuteBang(corrupt, L"Start");
-            Until([&] { return !idle->loading; }, "Start validates the remaining animation");
             Assert(errors.size() == 1 && !idle->animation && !idle->displayed && !idle->deferred,
-                "Start reports corruption in later animation data once");
+                "Full creation-time extraction reports corruption in later animation data once");
             for (int i = 0; i < 20; ++i) { double maximum = 0; Reload(corrupt, &options, &maximum); Update(corrupt); Pump(1); }
             Assert(errors.size() == 1, "Corrupt prefetch failure logs once and does not retry on updates");
             std::weak_ptr<AsyncLoader> corruptCleanup = idle->loader;
@@ -819,33 +838,13 @@ int wmain(int argc, wchar_t** argv)
         if (argc == 3 && std::wstring(argv[1]) == L"--large")
         {
             options = {{L"ImageName",argv[2]},{L"MeterName",L"LargeImage"},{L"Loop",L"-1"},{L"DisplayLoading",L"1"}};
-            const auto firstBegan = GetTickCount64();
-            Initialize(&data, &options);
-            m = static_cast<Measure*>(data);
-            Until([&] { return !m->loading; }, "Large GIF first-frame prefetch finishes", 30000);
-            Assert(m->animation && m->animation->frames.size() == 1 && m->animation->firstFrameOnly && !m->playing,
-                "Large GIF creation extracts only one frame and does not start playback");
-            std::cout << "Large GIF initial frame only: " << GetTickCount64() - firstBegan << " ms\n";
             const auto began = GetTickCount64();
             const auto beganPrecise = std::chrono::steady_clock::now();
-            Reload(data, &options, &maximum);
-            ExecuteBang(data, L"start");
+            Initialize(&data, &options);
+            m = static_cast<Measure*>(data);
             const auto reloadMs = GetTickCount64() - began;
             const auto reloadPreciseMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - beganPrecise).count();
-            Assert(reloadMs < 500 && m->loading, "Large GIF Reload returns immediately");
-            ExecuteBang(data, L"start");
-            ExecuteBang(data, L"pause");
-            Assert(m->paused && !m->startWhenReady, "Pause during loading cancels deferred start");
-            ExecuteBang(data, L"pause");
-            Assert(m->paused && !m->startWhenReady, "Repeated Pause during loading cannot resume deferred playback");
-            ExecuteBang(data, L"PauseResume");
-            Assert(m->startWhenReady, "PauseResume during loading resumes deferred start");
-            ExecuteBang(data, L"PauseResume");
-            Assert(m->paused && !m->startWhenReady, "PauseResume during loading toggles back to paused");
-            ExecuteBang(data, L"PauseResume");
-            ExecuteBang(data, L"end");
-            Assert(!m->startWhenReady && !m->paused, "End during loading cancels deferred playback");
-            ExecuteBang(data, L"start");
+            Assert(reloadMs < 500 && m->loading && !m->started, "Large GIF creation returns immediately without Start");
             size_t heartbeats = 0;
             ULONGLONG maxUiMs = reloadMs;
             double maxPreciseUiMs = reloadPreciseMs;
@@ -881,7 +880,13 @@ int wmain(int argc, wchar_t** argv)
                         "DisplayLoading can be re-enabled during extraction");
                 }
             }
-            Assert(!m->loading && m->animation && m->playing, "Large GIF completes and honors deferred Start");
+            Assert(!m->loading && m->animation && !m->playing && !m->started && m->index == 0,
+                "Large GIF fully preloads before Start and leaves frame one still");
+            const auto cachedRevision = m->loadRevision;
+            const auto* cachedAnimation = m->animation.get();
+            ExecuteBang(data, L"Start");
+            Assert(m->playing && !m->loading && m->loadRevision == cachedRevision && m->animation.get() == cachedAnimation,
+                "Start plays the large cached GIF without another extraction");
             Assert(heartbeats > 0 && maxUiMs < 500, "UI remains responsive throughout large extraction");
             Assert(previewMs >= 0 && previewMs < GetTickCount64() - began, "Annotated preview arrives before extraction completes");
             Until([&] { return !std::filesystem::exists(previewPath); }, "Loading preview is deleted after switching to real frames");

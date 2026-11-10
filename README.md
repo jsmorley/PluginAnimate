@@ -76,10 +76,10 @@ completion; use `Start` to start over in those states.
 frame update, resets the repeat count, and displays frame 0. It wakes the worker
 without waiting for the current frame delay, even with a long Speed interval.
 Natural completion leaves the last frame displayed.
-Loading a source happens asynchronously. Creation-time prefetch displays no
-partial frames; it waits for complete extraction and displays frame 1. If
-Start arrives during extraction, playback waits for completion. While a Start
-is pending, the existing first-frame loading preview behavior is available.
+Loading a source happens asynchronously, including creation-time preloading.
+The first frame is displayed as soon as it is extracted, while the remaining
+frames load in the background. Start received during extraction queues playback;
+without Start, completed extraction leaves the plain first frame still.
 With `DisplayLoading=1`, it displays a separate `loading.png` preview with **Loading...**
 superimposed in fixed 12-pixel, normal-weight text in the preview image, over a compact translucent dark panel
 in the center. This annotation is
@@ -87,7 +87,8 @@ drawn into the preview PNG by the plugin; no extra String meter is required.
 `DisplayLoading=0` is the default and uses the plain first frame,
 avoiding a flicker of Loading... on small animations. The option can be changed
 dynamically without restarting extraction. The actual animation frames remain
-unmodified. When extraction completes, playback uses those frames and the
+unmodified. When extraction completes, the plain first frame is displayed (and
+playback begins only if Start is pending), and the
 annotated preview is deleted in the background. `Start` received while loading remembers the request and starts
 playback when the frames are ready. `Pause` pauses that pending playback request;
 `PauseResume` toggles it, and `End` cancels it. Extraction may continue in the background so
@@ -307,6 +308,18 @@ Its provenance and license notices are in [third_party](third_party/README.md).
 Binary distributions must retain the libwebp notices provided in
 `Releases/WEBP-NOTICES.txt`.
 
+Version 2.2.0 validation on November 10, 2026: x64 and Win32 regressions
+verify a full preload with an early loading preview, a still first frame after
+completion, Start using the same cached animation without another extraction,
+and Start/End during extraction retaining the same load request. Disabled,
+Paused, deferred inputs, source-error budgets, timers, and cleanup remain covered.
+The 235-frame large GIF showed its annotated preview in 151 ms without Start;
+full preloading finished in 3.80 seconds while 239 UI heartbeats were processed.
+Creation returned in 3.95 ms. Start then used the existing frames immediately.
+These are local test measurements, not timing guarantees for other animations.
+Native Rainmeter checks confirm complete preloading before Start, no autoplay,
+WebParser enable/unpause/start, bounded source errors, and frame-file protection.
+
 Version 2.1.0 validation on November 10, 2026: both x64 and Win32
 regression suites passed, including disabled and paused creation with zero animation-option
 reads, no workers or image output, immediate Enable/Start, and disabling/host-pausing active
@@ -401,7 +414,7 @@ extraction, not initial frame extraction, and is not a performance guarantee for
 other files, frame rates, skin configurations, or hardware. CPU-cycle counts
 are machine-specific counters and are not converted into elapsed time.
 
-Version **2.1.0** checks the measure's `Disabled` and `Paused` flags before reading any
+Version **2.2.0** checks the measure's `Disabled` and `Paused` flags before reading any
 animation options. With `Disabled=1` or `Paused=1`, creation does not resolve `ImageName`,
 create workers, extract frames, log source errors, or send a first frame.
 Commands received while disabled or paused do not initialize playback. Clear the
@@ -419,12 +432,14 @@ a later enabled, unpaused Start begins again at frame 1. These host flags are
 separate from Animate's `Pause` and `PauseResume` commands, which still retain
 the current playback position.
 
-An enabled measure reads all animation options when it is created. If `ImageName`
-resolves to an existing animation, only its first composited frame is extracted on the background worker and
-displayed on the target Image meter. No remaining frames are decoded or written
-until `Start`. Start extracts the complete animation in the background, keeping
-the initial frame visible, and then begins playback. `DisplayLoading=1` can
-show the annotated loading preview during this full extraction.
+An enabled, unpaused measure reads all animation options when it is created.
+If `ImageName` resolves to an existing animation, full extraction begins on the
+background worker. The first composited frame is displayed as soon as it is
+ready, with the small Loading... overlay if `DisplayLoading=1`. Extraction
+continues without blocking skin updates. When complete, the overlay disappears
+and the plain first frame remains still. `Start` plays these cached frames
+without another extraction. If Start arrives while extraction is in progress,
+it queues playback without restarting the extraction.
 
 If a missing filename contains section-variable syntax such as `[MeasureIcon]`,
 Animate instead waits silently for `Start`: no extraction, runtime workers,
@@ -432,9 +447,8 @@ Image meter commands, or repeated option reads. This supports WebParser values
 that do not exist yet. A resolved filename of only `.webp`, `.apng`, or `.gif`
 (case insensitive, including within a folder path) also waits silently. This
 covers empty icon names supplied through `#VariableName#` as well as section
-variables, and literal extension-only placeholders. An existing file that cannot supply a valid first frame reports an
-error, even when its name contains a section variable. Corruption in later
-frames is reported when Start performs the full extraction. Missing literal paths
+variables, and literal extension-only placeholders. An existing corrupt or unsupported file reports an error during extraction,
+even when its name contains a section variable. Missing literal paths
 and empty literal filenames also report an error during creation and stop trying.
 Every explicit `Start` while enabled and unpaused reads the current options and resolves section variables
 again, even without `DynamicVariables=1`. It retries a failed file once, so a

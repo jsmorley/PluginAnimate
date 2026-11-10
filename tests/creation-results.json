@@ -1,7 +1,7 @@
 {
-  "Version": "2.1.0",
+  "Version": "2.2.0",
   "PrefetchBeforeStart": true,
-  "OnlyFirstFrameExtracted": true,
+  "FullExtractionBeforeStart": true,
   "FirstFrameOnly": true,
   "StartsOnlyOnCommand": true,
   "InvalidCreationErrors": 4,

@@ -117,7 +117,7 @@ function Update()
         first=image
         local last=image:gsub('frame%-0%.bmp$','frame-3.bmp')
         local f=last~='' and io.open(last,'rb')
-        Record('OnlyFirstFrameExtractedAndDisplayed',image:match('frame%-0%.bmp$')~=nil and f==nil)
+        Record('AllFramesExtractedAndFirstFrameStill',image:match('frame%-0%.bmp$')~=nil and f~=nil)
         if f then f:close() end
         Record('CreationErrorsDoNotSendImages',SKIN:GetMeter('MissingImage'):GetOption('ImageName','')=='' and SKIN:GetMeter('CorruptImage'):GetOption('ImageName','')=='' and SKIN:GetMeter('DirectoryImage'):GetOption('ImageName','')=='' and SKIN:GetMeter('EmptyImage'):GetOption('ImageName','')=='')
         Record('ExtensionOnlyInputsRemainSilent',SKIN:GetMeter('ExtensionWebpImage'):GetOption('ImageName','')=='' and SKIN:GetMeter('ExtensionApngImage'):GetOption('ImageName','')=='' and SKIN:GetMeter('ExtensionGifImage'):GetOption('ImageName','')=='')
@@ -142,7 +142,7 @@ try {
         $taskErrors | Select-Object -First 8 | Write-Output
         throw 'Native creation checks failed'
     }
-    [PSCustomObject]@{Version=(Get-Item -LiteralPath $Plugin).VersionInfo.FileVersion; PrefetchBeforeStart=$true; OnlyFirstFrameExtracted=$true; FirstFrameOnly=$true;
+    [PSCustomObject]@{Version=(Get-Item -LiteralPath $Plugin).VersionInfo.FileVersion; PrefetchBeforeStart=$true; FullExtractionBeforeStart=$true; FirstFrameOnly=$true;
         StartsOnlyOnCommand=$true; InvalidCreationErrors=$taskErrors.Count; ImageMeterErrors=0; Passed=$true} |
         ConvertTo-Json | Set-Content (Join-Path $PSScriptRoot 'creation-results.json')
 } finally {
