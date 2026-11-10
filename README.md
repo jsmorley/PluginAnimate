@@ -4,46 +4,6 @@ Native C++ Rainmeter plugin for animated GIF, APNG, and WebP files. Frames are d
 once into 32-bit BMP V5 files with alpha; a normal `Meter=Image` displays them. No external codec, command
 line program, or C++ runtime installation is required.
 
-Version **2.1.0** checks the measure's `Disabled` and `Paused` flags before reading any
-animation options. With `Disabled=1` or `Paused=1`, creation does not resolve `ImageName`,
-create workers, extract frames, log source errors, or send a first frame.
-Commands received while disabled or paused do not initialize playback. Clear the
-corresponding host flag first:
-
-```ini
-FinishAction=[!EnableMeasure MeasureAnimate][!UnpauseMeasure MeasureAnimate][!CommandMeasure MeasureAnimate "Start"]
-```
-
-The SDK requires reading the `Disabled` and `Paused` control flags themselves; all animation
-options remain unread until enabled. Enable followed immediately by Start
-works without `DynamicVariables=1` or an intervening update. Disabling or host-pausing active
-playback stops further frame output when its next display/load callback runs;
-a later enabled, unpaused Start begins again at frame 1. These host flags are
-separate from Animate's `Pause` and `PauseResume` commands, which still retain
-the current playback position.
-
-An enabled measure reads all animation options when it is created. If `ImageName`
-resolves to an existing animation, only its first composited frame is extracted on the background worker and
-displayed on the target Image meter. No remaining frames are decoded or written
-until `Start`. Start extracts the complete animation in the background, keeping
-the initial frame visible, and then begins playback. `DisplayLoading=1` can
-show the annotated loading preview during this full extraction.
-
-If a missing filename contains section-variable syntax such as `[MeasureIcon]`,
-Animate instead waits silently for `Start`: no extraction, runtime workers,
-Image meter commands, or repeated option reads. This supports WebParser values
-that do not exist yet. A resolved filename of only `.webp`, `.apng`, or `.gif`
-(case insensitive, including within a folder path) also waits silently. This
-covers empty icon names supplied through `#VariableName#` as well as section
-variables, and literal extension-only placeholders. An existing file that cannot supply a valid first frame reports an
-error, even when its name contains a section variable. Corruption in later
-frames is reported when Start performs the full extraction. Missing literal paths
-and empty literal filenames also report an error during creation and stop trying.
-Every explicit `Start` while enabled and unpaused reads the current options and resolves section variables
-again, even without `DynamicVariables=1`. It retries a failed file once, so a
-repaired file at the same path can recover. Skin updates never retry an
-unchanged failed source.
-
 For a comparison of image formats, see SVGator's
 [GIF vs PNG vs JPEG vs WebP image formats guide](https://www.svgator.com/blog/gif-vs-png-jpeg-webp-image-formats-guide/).
 
@@ -440,3 +400,43 @@ variation can affect the difference. This measures ongoing playback after
 extraction, not initial frame extraction, and is not a performance guarantee for
 other files, frame rates, skin configurations, or hardware. CPU-cycle counts
 are machine-specific counters and are not converted into elapsed time.
+
+Version **2.1.0** checks the measure's `Disabled` and `Paused` flags before reading any
+animation options. With `Disabled=1` or `Paused=1`, creation does not resolve `ImageName`,
+create workers, extract frames, log source errors, or send a first frame.
+Commands received while disabled or paused do not initialize playback. Clear the
+corresponding host flag first:
+
+```ini
+FinishAction=[!EnableMeasure MeasureAnimate][!UnpauseMeasure MeasureAnimate][!CommandMeasure MeasureAnimate "Start"]
+```
+
+The SDK requires reading the `Disabled` and `Paused` control flags themselves; all animation
+options remain unread until enabled. Enable followed immediately by Start
+works without `DynamicVariables=1` or an intervening update. Disabling or host-pausing active
+playback stops further frame output when its next display/load callback runs;
+a later enabled, unpaused Start begins again at frame 1. These host flags are
+separate from Animate's `Pause` and `PauseResume` commands, which still retain
+the current playback position.
+
+An enabled measure reads all animation options when it is created. If `ImageName`
+resolves to an existing animation, only its first composited frame is extracted on the background worker and
+displayed on the target Image meter. No remaining frames are decoded or written
+until `Start`. Start extracts the complete animation in the background, keeping
+the initial frame visible, and then begins playback. `DisplayLoading=1` can
+show the annotated loading preview during this full extraction.
+
+If a missing filename contains section-variable syntax such as `[MeasureIcon]`,
+Animate instead waits silently for `Start`: no extraction, runtime workers,
+Image meter commands, or repeated option reads. This supports WebParser values
+that do not exist yet. A resolved filename of only `.webp`, `.apng`, or `.gif`
+(case insensitive, including within a folder path) also waits silently. This
+covers empty icon names supplied through `#VariableName#` as well as section
+variables, and literal extension-only placeholders. An existing file that cannot supply a valid first frame reports an
+error, even when its name contains a section variable. Corruption in later
+frames is reported when Start performs the full extraction. Missing literal paths
+and empty literal filenames also report an error during creation and stop trying.
+Every explicit `Start` while enabled and unpaused reads the current options and resolves section variables
+again, even without `DynamicVariables=1`. It retries a failed file once, so a
+repaired file at the same path can recover. Skin updates never retry an
+unchanged failed source.
