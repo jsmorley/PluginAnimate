@@ -98,7 +98,7 @@ try {
     if (-not $taskProcess.WaitForExit(20000)) { throw 'Isolated Rainmeter test did not finish.' }
     $taskLog = Join-Path $taskRoot 'Rainmeter.log'
     $taskErrors = @(Get-Content -LiteralPath $taskLog | Where-Object { $_ -match '^ERRO' -and $_ -match 'MissingWeather' })
-    $taskExpected = if ($DeleteFrames) { 0 } else { 3 }
+    $taskExpected = if ($DeleteFrames) { 0 } else { 4 }
     $taskPattern = if ($DeleteFrames) { 'Animate: Extracted frames are missing' } else { 'Animate: Cannot open animation file' }
     $taskResult = [PSCustomObject]@{
         Version = (Get-Item -LiteralPath $Plugin).VersionInfo.FileVersion
@@ -112,7 +112,7 @@ try {
     $taskResult | ConvertTo-Json | Write-Output
     if ($taskErrors.Count -ne $taskExpected -or -not $taskResult.OnlyExpectedErrors) {
         $taskErrors | Write-Output
-        throw 'Expected exactly one source error per Start and no Image meter errors.'
+        throw 'Expected only bounded creation/Start/source-change errors and no Image meter errors.'
     }
     $taskName = if ($DeleteFrames) { 'protected-frames-results.json' } else { 'missing-source-results.json' }
     $taskResult | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot $taskName) -Encoding utf8

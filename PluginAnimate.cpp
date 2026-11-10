@@ -43,6 +43,8 @@ struct Measure
     bool startWhenReady = false;
     bool displayLoading = false;
     bool started = false;
+    bool configured = false;
+    bool deferred = false;
     bool displayed = false;
     uint64_t pendingStarts = 0;
     bool frameErrorAllowed = false;
@@ -108,7 +110,8 @@ struct Measure
         {
             std::lock_guard<std::mutex> lock(mutex);
             ValidateFrame(error);
-            const std::wstring image = animation ? animation->frames[index] : (displayLoading ? preview : originalPreview);
+            const std::wstring image = animation ? animation->frames[index] :
+                (started ? (displayLoading ? preview : originalPreview) : L"");
             // An empty image actively clears a previous frame. Leaving a deleted
             // frame path on the meter makes Rainmeter log on every skin update.
             if (!meter.empty() && (!image.empty() || displayed))
@@ -136,11 +139,13 @@ struct Measure
             if (stage == 1)
             {
                 if (!loader->Preview(revision, preview, originalPreview, previewDelay)) return;
+                // Creation-time prefetch displays only the completed first frame.
+                if (!started) return;
             }
             else if (stage == 0)
             {
                 if (!loader->Take(revision, animation, error)) return;
-                if (!error.empty()) { errorReports = pendingStarts; frameErrorAllowed = false; }
+                if (!error.empty()) { errorReports = (std::max)(uint64_t(1), pendingStarts); frameErrorAllowed = false; }
                 pendingStarts = 0;
                 loading = false;
                 preview.clear();
@@ -235,6 +240,21 @@ bool SafeArgument(const std::wstring& text)
 {
     return text.find_first_of(L"\"\r\n[]") == std::wstring::npos;
 }
+bool HasSectionVariable(const std::wstring& text)
+{
+    for (size_t begin = text.find(L'['); begin != std::wstring::npos; begin = text.find(L'[', begin + 1))
+    {
+        const auto end = text.find(L']', begin + 1);
+        if (end != std::wstring::npos && end > begin + 1) return true;
+    }
+    return false;
+}
+bool ExtensionOnly(const std::wstring& source)
+{
+    const auto separator = source.find_last_of(L"\\/");
+    const wchar_t* filename = source.c_str() + (separator == std::wstring::npos ? 0 : separator + 1);
+    return _wcsicmp(filename, L".webp") == 0 || _wcsicmp(filename, L".apng") == 0 || _wcsicmp(filename, L".gif") == 0;
+}
 bool StartRuntime(Measure& measure)
 {
     measure.skin = RmGetSkin(measure.rm);
@@ -265,21 +285,26 @@ bool StartRuntime(Measure& measure)
 }
 }
 
+PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue);
+
 PLUGIN_EXPORT void Initialize(void** data, void* rm)
 {
-    // Rainmeter requires a measure object; all options, runtime workers and file
-    // activity are deferred until the first explicit Start.
     auto measure = std::make_unique<Measure>();
     measure->rm = rm;
     *data = measure.release();
+    double maximum = 0;
+    Reload(*data, rm, &maximum);
 }
 
 PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
 {
     auto& m = *static_cast<Measure*>(data);
-    if (!m.started) { *maxValue = 0.0; return; }
+    if (m.deferred && !m.started) { *maxValue = 0.0; return; }
     std::unique_lock<std::mutex> lock(m.mutex);
     bool show = false;
+    std::wstring error;
+    // Preserve section-variable syntax before Rainmeter substitutes its value.
+    const std::wstring expression = RmReadString(rm, L"ImageName", L"", FALSE);
     std::wstring raw = RmReadString(rm, L"ImageName", L"");
     std::wstring source = raw.empty() ? L"" : RmPathToAbsolute(rm, raw.c_str());
     std::wstring meter = RmReadString(rm, L"MeterName", L"");
@@ -294,11 +319,32 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
         meter.clear();
     }
     const bool wasPlaying = m.playing;
-    const bool sourceChanged = source != m.source;
+    const bool sourceChanged = !m.configured || source != m.source;
     const bool speedChanged = speed != m.speed;
     show = meter != m.meter || displayLoading != m.displayLoading;
     m.displayLoading = displayLoading;
     m.meter = std::move(meter); m.speed = speed; m.loop = loop;
+    m.configured = true;
+    const bool extensionOnly = ExtensionOnly(source);
+    if (!m.started && (HasSectionVariable(expression) || extensionOnly))
+    {
+        const DWORD attributes = (source.empty() || extensionOnly) ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(source.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            m.deferred = true;
+            m.StopPlayback();
+            m.source.clear(); m.preview.clear(); m.originalPreview.clear();
+            m.startWhenReady = false; m.pendingStarts = 0;
+            if (m.animation) m.retired.push_back(std::move(m.animation));
+            if (m.loader) m.loadRevision = m.loader->Request(L"", {});
+            m.loading = false;
+            *maxValue = 0.0;
+            lock.unlock();
+            m.Show();
+            return;
+        }
+    }
+    m.deferred = false;
     if (sourceChanged)
     {
         show = true;
@@ -310,20 +356,23 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
         m.preview.clear();
         m.originalPreview.clear();
         if (m.animation) m.retired.push_back(std::move(m.animation));
+        if (!m.source.empty() && !m.loader) StartRuntime(m);
         if (m.loader) m.loadRevision = m.loader->Request(m.source, {});
         m.loading = m.loader && !m.source.empty();
+        if (m.source.empty() && !m.started) error = L"Animate: ImageName is empty.";
     }
     if (m.meter.empty() || !m.animation) m.StopPlayback();
     else if (wasPlaying && speedChanged) m.StartPlayback();
     *maxValue = m.animation ? double(m.speed ? m.speed : *std::max_element(m.animation->delays.begin(), m.animation->delays.end())) : 0.0;
     lock.unlock();
+    if (!error.empty()) RmLog(m.rm, LOG_ERROR, error.c_str());
     if (show) m.Show();
 }
 
 PLUGIN_EXPORT double Update(void* data)
 {
     auto& m = *static_cast<Measure*>(data);
-    if (!m.started) return 0.0;
+    if (!m.started && !m.animation) return 0.0;
     std::unique_lock<std::mutex> lock(m.mutex);
     std::wstring error;
     if (!m.ValidateFrame(error))
@@ -339,7 +388,7 @@ PLUGIN_EXPORT double Update(void* data)
 
 PLUGIN_EXPORT LPCWSTR GetString(void* data)
 {
-    // Source is empty before Start and is only read/refreshed on the UI thread.
+    // An unresolved section-variable source stays empty until Start.
     return static_cast<Measure*>(data)->source.c_str();
 }
 

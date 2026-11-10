@@ -19,14 +19,29 @@ enum { LOG_ERROR = 1, LOG_WARNING = 2 };
 std::map<std::wstring, std::wstring> options;
 std::vector<std::wstring> commands, errors;
 size_t optionReads = 0;
+std::map<std::wstring, std::wstring> sectionValues;
+std::wstring resolvedOption;
 std::wstring testResources;
 void* RmGetSkin(void* rm) { return rm; }
 double RmReadDouble(void* rm, LPCWSTR name, double value) { return RmReadFormula(rm, name, value); }
-LPCWSTR __stdcall RmReadString(void*, LPCWSTR key, LPCWSTR fallback, BOOL)
+LPCWSTR __stdcall RmReadString(void*, LPCWSTR key, LPCWSTR fallback, BOOL replaceMeasures)
 {
     ++optionReads;
     auto found = options.find(key);
-    return found == options.end() ? fallback : found->second.c_str();
+    if (found == options.end()) return fallback;
+    if (!replaceMeasures) return found->second.c_str();
+    resolvedOption = found->second;
+    for (const auto& entry : sectionValues)
+    {
+        const auto token = L"[" + entry.first + L"]";
+        size_t pos = 0;
+        while ((pos = resolvedOption.find(token, pos)) != std::wstring::npos)
+        {
+            resolvedOption.replace(pos, token.size(), entry.second);
+            pos += entry.second.size();
+        }
+    }
+    return resolvedOption.c_str();
 }
 double __stdcall RmReadFormula(void*, LPCWSTR key, double fallback)
 {
@@ -393,24 +408,57 @@ int wmain(int argc, wchar_t** argv)
         }
 
         {
-            options = {{L"ImageName",(testSkin.resources / L".webp").wstring()},{L"MeterName",L"DeferredImage"},{L"Loop",L"-1"}};
+            options = {{L"ImageName",fixture(L"blend.webp")},{L"MeterName",L"PrefetchImage"},{L"Speed",L"75"},{L"Loop",L"-1"},{L"DisplayLoading",L"1"}};
+            void* prefetch = nullptr;
+            const auto reads = optionReads, displays = commands.size();
+            Initialize(&prefetch, &options);
+            auto* idle = static_cast<Measure*>(prefetch);
+            Assert(optionReads > reads && idle->loading && !idle->started && idle->meter == L"PrefetchImage" &&
+                idle->speed == 75 && idle->loop == -1 && idle->displayLoading, "Creation reads all options and starts asynchronous prefetch");
+            Until([&] { return !idle->loading; }, "Creation-time prefetch finishes");
+            Assert(idle->animation && idle->index == 0 && !idle->playing && commands.size() == displays + 1 &&
+                commands.back().find(L"frame-0.bmp") != std::wstring::npos,
+                "Completed prefetch displays only the real first frame, even with DisplayLoading enabled");
+            Pump(120);
+            Assert(idle->index == 0 && commands.size() == displays + 1 && Update(prefetch) == 75,
+                "Prefetched frame remains still until Start");
+            ExecuteBang(prefetch, L"start");
+            Assert(idle->playing && idle->index == 0 && !idle->loading, "Start plays already-extracted frames without reloading");
+            std::weak_ptr<AsyncLoader> prefetchCleanup = idle->loader;
+            Finalize(prefetch);
+            Until([&] { return prefetchCleanup.expired(); }, "Prefetch cleanup completes");
+        }
+        {
+            sectionValues[L"Icon"] = L"blend";
+            options = {{L"ImageName",fixture(L"[Icon].webp")},{L"MeterName",L"ResolvedImage"}};
+            void* resolved = nullptr;
+            Initialize(&resolved, &options);
+            auto* idle = static_cast<Measure*>(resolved);
+            Until([&] { return !idle->loading; }, "Existing section-variable filename prefetches");
+            Assert(idle->animation && idle->displayed && !idle->playing && !idle->deferred,
+                "Section-variable inputs that already resolve are loaded immediately");
+            std::weak_ptr<AsyncLoader> resolvedCleanup = idle->loader;
+            Finalize(resolved);
+            Until([&] { return resolvedCleanup.expired(); }, "Resolved-variable cleanup completes");
+        }
+        {
+            sectionValues[L"Icon"] = L"";
+            options = {{L"ImageName",fixture(L"[Icon].webp")},{L"MeterName",L"DeferredImage"},{L"Loop",L"-1"}};
             void* deferred = nullptr; double deferredMaximum = -1;
             const auto reads = optionReads, displays = commands.size();
             Initialize(&deferred, &options);
             auto* idle = static_cast<Measure*>(deferred);
+            const auto creationReads = optionReads;
             for (int i = 0; i < 20; ++i) { Reload(deferred, &options, &deferredMaximum); Update(deferred); Pump(1); }
             ExecuteBang(deferred, L"pause");
             ExecuteBang(deferred, L"end");
-            Assert(!idle->started && !idle->window && !idle->loader && !idle->worker.joinable() &&
-                idle->source.empty() && idle->meter.empty() && optionReads == reads && commands.size() == displays &&
-                std::wstring(GetString(deferred)).empty() && deferredMaximum == 0 && errors.empty(),
-                "Before Start: no options, cached source, workers, file activity, meter updates or errors");
-            // WebParser finishes between host updates. Start must read the new
-            // value itself; there is no Reload or DynamicVariables in this case.
-            options[L"ImageName"] = fixture(L"blend.webp");
+            Assert(idle->deferred && !idle->started && !idle->window && !idle->loader && !idle->worker.joinable() &&
+                idle->source.empty() && idle->meter == L"DeferredImage" && creationReads > reads && optionReads == creationReads &&
+                commands.size() == displays && std::wstring(GetString(deferred)).empty() && deferredMaximum == 0 && errors.empty(),
+                "Unresolved section-variable input reads options once, then stays dormant without errors or meter commands");
+            sectionValues[L"Icon"] = L"blend";
             ExecuteBang(deferred, L"start");
-            Assert(idle->started && idle->loading && commands.size() == displays,
-                "Start initializes lazily without updating an empty meter");
+            Assert(idle->started && idle->loading && commands.size() == displays, "FinishAction Start resolves current section variables");
             Until([&] { return !idle->loading; }, "Deferred source loads");
             Assert(idle->animation && idle->playing && idle->source == fixture(L"blend.webp") && errors.empty(),
                 "First Start resolves the current source without a preceding Reload");
@@ -423,6 +471,64 @@ int wmain(int argc, wchar_t** argv)
             std::weak_ptr<AsyncLoader> deferredCleanup = idle->loader;
             Finalize(deferred);
             Until([&] { return deferredCleanup.expired(); }, "Deferred-start resources clean up");
+            sectionValues.clear();
+        }
+        for (const auto* filename : {L".webp",L".apng",L".gif",L".WEBP",L".APNG",L".GIF"})
+        {
+            options = {{L"ImageName",(testSkin.resources / filename).wstring()},{L"MeterName",L"ExtensionImage"}};
+            void* deferred = nullptr;
+            const auto displays = commands.size();
+            Initialize(&deferred, &options);
+            auto* idle = static_cast<Measure*>(deferred);
+            const auto reads = optionReads;
+            for (int i = 0; i < 10; ++i) { double maximum = 0; Reload(deferred, &options, &maximum); Update(deferred); Pump(1); }
+            Assert(idle->deferred && !idle->loader && !idle->window && idle->source.empty() && optionReads == reads &&
+                commands.size() == displays && errors.empty(), "Extension-only filename waits silently without workers, retries, or meter commands");
+            options[L"ImageName"] = fixture(L"blend.webp");
+            ExecuteBang(deferred, L"start");
+            Until([&] { return !idle->loading; }, "Extension-only placeholder resolves on Start");
+            Assert(idle->animation && idle->playing && errors.empty(), "Start recovers extension-only placeholders");
+            std::weak_ptr<AsyncLoader> deferredCleanup = idle->loader;
+            Finalize(deferred);
+            Until([&] { return deferredCleanup.expired(); }, "Extension-only cleanup completes");
+        }
+        {
+            sectionValues[L"Icon"] = L"";
+            options = {{L"ImageName",fixture(L"[Icon].webp")},{L"MeterName",L"EarlyStartImage"}};
+            void* deferred = nullptr;
+            Initialize(&deferred, &options);
+            auto* idle = static_cast<Measure*>(deferred);
+            Assert(idle->deferred && errors.empty(), "Unready section variable is silent at creation");
+            ExecuteBang(deferred, L"start");
+            Until([&] { return !idle->loading; }, "Premature Start fails once");
+            Assert(errors.size() == 1 && !idle->animation && !idle->displayed, "Explicit Start with an unready source reports one error");
+            const auto revision = idle->loadRevision;
+            for (int i = 0; i < 20; ++i) { double maximum = 0; Reload(deferred, &options, &maximum); Update(deferred); Pump(1); }
+            Assert(errors.size() == 1 && idle->loadRevision == revision, "Failed Start remains stopped without automatic retries");
+            sectionValues[L"Icon"] = L"blend";
+            ExecuteBang(deferred, L"start");
+            Until([&] { return !idle->loading; }, "FinishAction Start retries the resolved source");
+            Assert(idle->playing && errors.size() == 1, "Later valid Start recovers without extra errors");
+            std::weak_ptr<AsyncLoader> deferredCleanup = idle->loader;
+            Finalize(deferred);
+            Until([&] { return deferredCleanup.expired(); }, "Premature-Start cleanup completes");
+            errors.clear(); sectionValues.clear();
+        }
+        {
+            sectionValues[L"Icon"] = L"bad";
+            options = {{L"ImageName",fixture(L"[Icon].apng")},{L"MeterName",L"CorruptImage"}};
+            void* corrupt = nullptr;
+            Initialize(&corrupt, &options);
+            auto* idle = static_cast<Measure*>(corrupt);
+            Until([&] { return !idle->loading; }, "Existing corrupt variable input fails prefetch");
+            Assert(errors.size() == 1 && !idle->animation && !idle->displayed && !idle->deferred,
+                "A section variable does not suppress corrupt-file errors when its file exists");
+            for (int i = 0; i < 20; ++i) { double maximum = 0; Reload(corrupt, &options, &maximum); Update(corrupt); Pump(1); }
+            Assert(errors.size() == 1, "Corrupt prefetch failure logs once and does not retry on updates");
+            std::weak_ptr<AsyncLoader> corruptCleanup = idle->loader;
+            Finalize(corrupt);
+            Until([&] { return corruptCleanup.expired(); }, "Corrupt prefetch cleanup completes");
+            errors.clear(); sectionValues.clear();
         }
         options = {{L"ImageName",fixture(L"blend.apng")},{L"MeterName",L"Image"},{L"Speed",L"20"},{L"Loop",L"0"}};
         void* data = nullptr; double maximum = 0;
@@ -590,40 +696,42 @@ int wmain(int argc, wchar_t** argv)
         Assert(errors.empty(), "No unexpected plugin errors");
         // Weather skins can issue Start on refresh before WebParser supplies an
         // icon code, temporarily leaving an empty or extension-only filename.
-        for (const auto& invalid : {std::wstring(), (testSkin.resources / L".webp").wstring(), fixture(L"bad.apng")})
+        for (const auto& invalid : {std::wstring(), (testSkin.resources / L"missing.webp").wstring(), fixture(L"bad.apng")})
         {
             options = {{L"ImageName", invalid},{L"MeterName",L"WeatherImage"},{L"Loop",L"-1"}};
             Initialize(&data, &options);
             m = static_cast<Measure*>(data);
             Reload(data, &options, &maximum);
+            const size_t expectedErrors = invalid.empty() ? 2 : 1;
             ExecuteBang(data, L"start");
             Until([&] { return !m->loading; }, "Invalid weather source completes its load attempt");
-            Assert(errors.size() == 1 && !m->playing && m->startWhenReady, "Refresh Start logs one error and waits for a valid icon");
+            Assert(errors.size() == expectedErrors && !m->playing && m->startWhenReady, "Refresh Start logs one error and waits for a valid icon");
             Assert(!m->displayed, "Failed first load does not display or update an empty meter");
             const auto revision = m->loadRevision;
             const auto failedCommands = commands.size();
             for (int i = 0; i < 50; ++i) { Reload(data, &options, &maximum); Update(data); Pump(1); }
-            Assert(errors.size() == 1 && m->loadRevision == revision && commands.size() == failedCommands,
+            Assert(errors.size() == expectedErrors && m->loadRevision == revision && commands.size() == failedCommands,
                 "Skin updates neither retry an invalid source nor repeat errors or image bangs");
             ExecuteBang(data, L"StArT");
             ExecuteBang(data, L"start");
             Until([&] { return !m->loading; }, "Explicit Start retries finish");
-            Assert(errors.size() == 3, "Exactly one source error for each explicit Start, including queued Starts");
+            Assert(errors.size() == expectedErrors + 2, "Exactly one source error for each explicit Start, including queued Starts");
             ExecuteBang(data, L"end");
             options[L"ImageName"] = fixture(L"blend.webp");
             Reload(data, &options, &maximum);
             Until([&] { return !m->loading; }, "Valid replacement after End loads");
-            Assert(m->animation && !m->playing && errors.size() == 3, "End cancels waiting playback");
+            Assert(m->animation && !m->playing && errors.size() == expectedErrors + 2, "End cancels waiting playback");
             ExecuteBang(data, L"start");
             options[L"ImageName"] = invalid.empty() ? L"" : (testSkin.resources / L".webp").wstring();
             Reload(data, &options, &maximum);
             Until([&] { return !m->loading; }, "Failed dynamic replacement loads silently");
-            Assert(errors.size() == 3 && m->startWhenReady && commands.back().find(L"ImageName \"\"") != std::wstring::npos,
+            const size_t dynamicErrors = expectedErrors + 2 + (invalid.empty() ? 0 : 1);
+            Assert(errors.size() == dynamicErrors && m->startWhenReady && commands.back().find(L"ImageName \"\"") != std::wstring::npos,
                 "Dynamic invalid source stays quiet and clears deleted frame paths");
             options[L"ImageName"] = fixture(L"blend.webp");
             Reload(data, &options, &maximum);
             Until([&] { return !m->loading; }, "WeatherParser valid icon loads");
-            Assert(m->animation && m->playing && errors.size() == 3, "Original playback request resumes when WebParser supplies a valid source");
+            Assert(m->animation && m->playing && errors.size() == dynamicErrors, "Original playback request resumes when WebParser supplies a valid source");
             cleanup = m->loader;
             Finalize(data);
             Until([&] { return cleanup.expired(); }, "Failed-source test cleanup completes");
@@ -636,15 +744,16 @@ int wmain(int argc, wchar_t** argv)
             m = static_cast<Measure*>(data);
             Reload(data, &options, &maximum);
             Until([&] { return !m->loading; }, "Unstarted failed source finishes silently");
-            Assert(!m->started && !m->loader && errors.empty(), "No prefetch or errors before Start");
+            Assert(m->loader && !m->animation && errors.size() == 1, "Missing literal source logs once during creation");
             std::filesystem::copy_file(fixture(L"blend.webp"), repair);
             ExecuteBang(data, L"start");
             Until([&] { return !m->loading; }, "Repaired source reloads on Start");
-            Assert(m->animation && m->playing && errors.empty(), "Start retries a repaired filename without a stale error");
+            Assert(m->animation && m->playing && errors.size() == 1, "Start retries a repaired filename without a stale error");
             cleanup = m->loader;
             Finalize(data);
             Until([&] { return cleanup.expired(); }, "Repaired-source cleanup completes");
             std::filesystem::remove(repair);
+            errors.clear();
         }
         {
             options = {{L"ImageName",fixture(L"blend.webp")},{L"MeterName",L"WeatherImage"},{L"Loop",L"-1"},{L"Speed",L"30000"}};

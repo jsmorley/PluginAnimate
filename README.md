@@ -4,18 +4,31 @@ Native C++ Rainmeter plugin for animated GIF, APNG, and WebP files. Frames are d
 once into 32-bit BMP V5 files with alpha; a normal `Meter=Image` displays them. No external codec, command
 line program, or C++ runtime installation is required.
 
-Version **1.9.0** defers animation initialization until the first explicit `Start`. Before then, it does not
-read or cache its options or filename, create playback/extraction workers, open
-files, or update the Image meter. Every `Start` reads the **current** options and
-resolves references such as `[MeasureIcon]` immediately, even without
-`DynamicVariables=1`.
+Version **2.0.0** reads all options when the measure is created. If `ImageName`
+resolves to an existing animation, extraction begins on the background worker.
+After all frames are ready, the target Image meter displays only the first
+real frame and waits. `Start` begins playback from that frame.
+
+If a missing filename contains section-variable syntax such as `[MeasureIcon]`,
+Animate instead waits silently for `Start`: no extraction, runtime workers,
+Image meter commands, or repeated option reads. This supports WebParser values
+that do not exist yet. A resolved filename of only `.webp`, `.apng`, or `.gif`
+(case insensitive, including within a folder path) also waits silently. This
+covers empty icon names supplied through `#VariableName#` as well as section
+variables, and literal extension-only placeholders. An existing file that is corrupt or unsupported is an
+error, even when its name contains a section variable. Missing literal paths
+and empty literal filenames also report an error during creation and stop trying.
+Every explicit `Start` reads the current options and resolves section variables
+again, even without `DynamicVariables=1`. It retries a failed file once, so a
+repaired file at the same path can recover. Skin updates never retry an
+unchanged failed source.
 
 For a comparison of image formats, see SVGator's
 [GIF vs PNG vs JPEG vs WebP image formats guide](https://www.svgator.com/blog/gif-vs-png-jpeg-webp-image-formats-guide/).
 
 ```ini
 [Rainmeter]
-OnRefreshAction=[!CommandMeasure MeasureAnimate "Start"]
+Update=1000
 
 [MeasureAnimate]
 Measure=Plugin
@@ -46,8 +59,10 @@ The measure's **numeric value is the effective frame delay in milliseconds**.
 For a positive Speed it returns that fixed duration. With `Speed=0`, it returns
 the current frame's embedded duration, including the documented minimum and
 rounding. Pausing retains the current frame's duration; ending reports the
-first frame's duration. While loading, it reports the preview frame's delay
-once available, or `0` before the preview exists or if loading fails.
+first frame's duration. Creation-time prefetch and deferred inputs report `0`
+until extraction completes. When Start is already pending during extraction,
+it reports the preview frame's delay once available, or `0` before the preview
+exists or if loading fails.
 The maximum value is the fixed duration when overridden, or the largest embedded
 duration in the loaded animation when using source timing.
 
@@ -80,8 +95,10 @@ completion; use `Start` to start over in those states.
 frame update, resets the repeat count, and displays frame 0. It wakes the worker
 without waiting for the current frame delay, even with a long Speed interval.
 Natural completion leaves the last frame displayed.
-Loading a source happens asynchronously. As soon as the first frame is decoded,
-the Image meter displays it while the remaining frames are extracted.
+Loading a source happens asynchronously. Creation-time prefetch displays no
+partial frames; it waits for complete extraction and displays frame 1. If
+Start arrives during extraction, playback waits for completion. While a Start
+is pending, the existing first-frame loading preview behavior is available.
 With `DisplayLoading=1`, it displays a separate `loading.png` preview with **Loading...**
 superimposed in fixed 12-pixel, normal-weight text in the preview image, over a compact translucent dark panel
 in the center. This annotation is
@@ -95,13 +112,11 @@ playback when the frames are ready. `Pause` pauses that pending playback request
 `PauseResume` toggles it, and `End` cancels it. Extraction may continue in the background so
 the frames remain available for a later `Start`.
 
-Version **1.6.0** stops repeated source-error reporting. A missing, empty,
-invalid, or undecodable animation produces **one error per explicit `Start`**.
-After failure, Animate stops playback and waits: skin updates and playback
-timers do not retry the failed source. A new `Start` retries it once, allowing
-a repaired file at the same path to load. A changed `ImageName` loads the new
-source normally. After activation, background source-change failures without a
-new `Start` stay silent.
+A failed creation-time extraction logs once. Later `Start` commands each retry
+once and report an error only if their attempt fails. A failure during an
+in-flight extraction with Start requests is reported once per requested Start.
+A changed `ImageName` loads the new source normally and logs a failed load once.
+
 The Image meter is cleared when changing sources or when extraction fails, so
 it does not keep trying to display deleted temporary frames.
 
@@ -154,6 +169,7 @@ The last frame's delay also elapses before completion or looping.
 
 The example starts with source timing enabled and provides an **Auto** button
 to restore `Speed=0` after using its fixed-speed buttons.
+It preloads and displays frame 1 on refresh; click **Start** to begin playback.
 Its **GIF**, **APNG**, and **WebP** buttons switch between the bundled samples.
 The WebP sample is `@Resources\DancingBanana.webp` (8 frames, 4,764 bytes),
 linked from [Google's WebP FAQ](https://developers.google.com/speed/webp/faq#why_should_i_use_animated_webp).
@@ -161,7 +177,8 @@ See [sample attribution](examples/Animate/@Resources/SOURCES.md).
 
 With `DynamicVariables=1`, Rainmeter rereads options on measure updates. After
 changing variables or options, use `!UpdateMeasure MeasureAnimate` to apply them
-immediately after the first Start. This is optional for changes between Start
+immediately. An unresolved section-variable input remains dormant until Start,
+even if dynamic updates are enabled. This is optional for changes between Start
 commands; `Start` itself always rereads the current options. A new source is
 extracted and reset to frame 0, retaining whether
 playback was running or paused. Changing Speed restarts the current interval;
@@ -176,7 +193,7 @@ without polling. Commands and dynamic options wake it through a condition
 variable. Finalization wakes and joins this playback worker promptly.
 
 Extraction and temporary-file deletion run on a separate background worker at
-below-normal thread priority. After the first Start, `Reload` queues a source request and returns
+below-normal thread priority. Creation or a changed source queues a request and returns
 without reading or decoding the animation. The extraction worker never holds
 the playback/UI mutex while decoding or writing frames. Changing sources cancels
 the old request; stale results and errors are discarded. Codec operations,
@@ -309,10 +326,22 @@ Its provenance and license notices are in [third_party](third_party/README.md).
 Binary distributions must retain the libwebp notices provided in
 `Releases/WEBP-NOTICES.txt`.
 
-The 1.9.0 startup regression verifies no option reads, cached filenames, workers or
-meter updates before Start. The native `tests/VerifyWebParserStart.ps1` test
-checks two parent WebParser downloads with a Start-only FinishAction, no child
-updates and no DynamicVariables.
+The 2.0.0 startup regressions verify creation-time option reads, full extraction
+and a still first frame before Start, deferred section-variable inputs,
+creation-time error reporting, explicit retries, and repaired-file recovery.
+The native `tests/VerifyWebParserStart.ps1` test checks two parent WebParser
+downloads with a Start-only FinishAction, no child updates and no DynamicVariables.
+`tests/VerifyCreation.ps1` checks the new prefetch and creation-error behavior
+in native Rainmeter.
+
+Version 2.0.0 validation on November 10, 2026: both x64 and Win32 regression
+suites passed, including the 235-frame GIF, deferred inputs, explicit retries,
+and protected-file cleanup. Native Rainmeter confirmed complete prefetch and
+a still first frame before Start, silent extension-only placeholders, bounded
+creation errors with no Image meter errors, and two real WebParser FinishAction
+updates without DynamicVariables or child updates. Results are in
+`tests/creation-results.json`, `tests/webparser-start-results.json`, and
+`tests/missing-source-results.json`.
 
 `tests/Tests.vcxproj` exercises GIF/APNG/WebP pixels, timing, transparency,
 blending/disposal, cancellation, malformed inputs, playback commands, and cleanup.

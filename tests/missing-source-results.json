@@ -1,9 +1,9 @@
 {
-  "Version": "1.9.0",
+  "Version": "2.0.0",
   "SkinUpdateMilliseconds": 10,
   "SkinUpdates": 500,
   "ExplicitStartCommands": 3,
-  "ErrorsObserved": 3,
+  "ErrorsObserved": 4,
   "OnlyExpectedErrors": true,
   "DeletionAttemptBlocked": false
 }

@@ -1,0 +1,9 @@
+{
+  "Version": "2.0.0",
+  "PrefetchBeforeStart": true,
+  "FirstFrameOnly": true,
+  "StartsOnlyOnCommand": true,
+  "InvalidCreationErrors": 4,
+  "ImageMeterErrors": 0,
+  "Passed": true
+}
