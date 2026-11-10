@@ -32,6 +32,7 @@ struct AnimationCancelled : std::exception
 // Owns only the files created by this extraction; never recursively deletes a path.
 struct Animation
 {
+    bool firstFrameOnly = false;
     std::wstring directory;
     std::wstring temporaryRoot;
     std::wstring preview;
@@ -51,4 +52,4 @@ struct Animation
 void CleanupOrphanAnimations(const std::wstring& resources);
 
 void ExtractAnimation(const std::wstring& path, const std::wstring& resources, Animation& output, const std::function<bool()>& cancelled = {},
-    const std::function<void(const Animation&)>& firstFrame = {});
+    const std::function<void(const Animation&)>& firstFrame = {}, bool firstFrameOnly = false);

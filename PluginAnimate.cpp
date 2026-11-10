@@ -40,6 +40,7 @@ struct Measure
     bool pending = false;
     bool paused = false;
     bool loading = false;
+    bool prefetching = false;
     bool startWhenReady = false;
     bool displayLoading = false;
     bool started = false;
@@ -103,15 +104,29 @@ struct Measure
         frameErrorAllowed = false;
         return false;
     }
+    // Rainmeter exposes Disabled/Paused as options, not through RmGet. Read
+    // only these host flags before touching animation options or UI output.
+    bool IsSuspended()
+    {
+        if (RmReadDouble(rm, L"Disabled", 0) == 0 && RmReadDouble(rm, L"Paused", 0) == 0) return false;
+        std::lock_guard<std::mutex> lock(mutex);
+        StopPlayback();
+        startWhenReady = false; pendingStarts = 0; paused = false;
+        if (loading && loader) loadRevision = loader->Request(L"", {});
+        loading = false;
+        return true;
+    }
     void Show()
     {
+        if (IsSuspended()) return;
         std::wstring command;
         std::wstring error;
         {
             std::lock_guard<std::mutex> lock(mutex);
             ValidateFrame(error);
-            const std::wstring image = animation ? animation->frames[index] :
-                (started ? (displayLoading ? preview : originalPreview) : L"");
+            const std::wstring loadingImage = started ? (displayLoading ? preview : originalPreview) : L"";
+            const std::wstring image = loading && !loadingImage.empty() ? loadingImage :
+                (animation ? animation->frames[index] : loadingImage);
             // An empty image actively clears a previous frame. Leaving a deleted
             // frame path on the meter makes Rainmeter log on every skin update.
             if (!meter.empty() && (!image.empty() || displayed))
@@ -131,6 +146,7 @@ struct Measure
     }
     void Loaded(UINT_PTR revision, LPARAM stage)
     {
+        if (IsSuspended()) return;
         std::wstring error;
         uint64_t errorReports = 0;
         {
@@ -144,7 +160,11 @@ struct Measure
             }
             else if (stage == 0)
             {
-                if (!loader->Take(revision, animation, error)) return;
+                std::unique_ptr<Animation> loaded;
+                if (!loader->Take(revision, loaded, error)) return;
+                if (animation) retired.push_back(std::move(animation));
+                animation = std::move(loaded);
+                prefetching = false;
                 if (!error.empty()) { errorReports = (std::max)(uint64_t(1), pendingStarts); frameErrorAllowed = false; }
                 pendingStarts = 0;
                 loading = false;
@@ -299,6 +319,7 @@ PLUGIN_EXPORT void Initialize(void** data, void* rm)
 PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
 {
     auto& m = *static_cast<Measure*>(data);
+    if (m.IsSuspended()) { *maxValue = 0.0; return; }
     if (m.deferred && !m.started) { *maxValue = 0.0; return; }
     std::unique_lock<std::mutex> lock(m.mutex);
     bool show = false;
@@ -357,7 +378,8 @@ PLUGIN_EXPORT void Reload(void* data, void* rm, double* maxValue)
         m.originalPreview.clear();
         if (m.animation) m.retired.push_back(std::move(m.animation));
         if (!m.source.empty() && !m.loader) StartRuntime(m);
-        if (m.loader) m.loadRevision = m.loader->Request(m.source, {});
+        m.prefetching = !m.started;
+        if (m.loader) m.loadRevision = m.loader->Request(m.source, {}, m.prefetching);
         m.loading = m.loader && !m.source.empty();
         if (m.source.empty() && !m.started) error = L"Animate: ImageName is empty.";
     }
@@ -395,6 +417,7 @@ PLUGIN_EXPORT LPCWSTR GetString(void* data)
 PLUGIN_EXPORT void ExecuteBang(void* data, LPCWSTR args)
 {
     auto& m = *static_cast<Measure*>(data);
+    if (m.IsSuspended()) return;
     if (_wcsicmp(args, L"start") == 0)
     {
         if (!m.started)
@@ -425,6 +448,16 @@ PLUGIN_EXPORT void ExecuteBang(void* data, LPCWSTR args)
         if (!m.worker.joinable() || m.meter.empty()) return;
         m.frameErrorAllowed = true;
         m.index = 0; m.repeats = 0; m.completed = false; m.paused = false;
+        if (m.prefetching || (m.animation && m.animation->firstFrameOnly && !m.loading))
+        {
+            m.StopPlayback();
+            m.prefetching = false;
+            m.pendingStarts = 1;
+            m.startWhenReady = true;
+            m.loading = true;
+            m.loadRevision = m.loader->Request(m.source, {});
+            return;
+        }
         if (m.loading) { ++m.pendingStarts; m.StopPlayback(); m.startWhenReady = true; return; }
         if (!m.animation)
         {

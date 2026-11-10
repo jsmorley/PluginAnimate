@@ -27,7 +27,7 @@ URL=file://#CURRENTPATH#first.txt
 RegExp=code=(\w+)
 Disabled=1
 UpdateRate=10000
-FinishAction=[!CommandMeasure Animate "Start"]
+FinishAction=[!EnableMeasure Animate][!UnpauseMeasure Animate][!CommandMeasure Animate "Start"]
 [Icon]
 Measure=WebParser
 URL=[Parent]
@@ -35,9 +35,43 @@ StringIndex=1
 [Animate]
 Measure=Plugin
 Plugin=Animate
+Disabled=1
+Paused=1
 ImageName=#@#[Icon].webp
 MeterName=Image
 Loop=-1
+[DisabledLiteral]
+Measure=Plugin
+Plugin=Animate
+Disabled=1
+ImageName=#@#first.webp
+MeterName=DisabledImage
+[DisabledMissing]
+Measure=Plugin
+Plugin=Animate
+Disabled=1
+ImageName=#@#missing.webp
+MeterName=DisabledImage
+[PausedLiteral]
+Measure=Plugin
+Plugin=Animate
+Paused=1
+ImageName=#@#first.webp
+MeterName=PausedImage
+[PausedMissing]
+Measure=Plugin
+Plugin=Animate
+Paused=1
+ImageName=#@#missing.webp
+MeterName=PausedImage
+[PausedImage]
+Meter=Image
+W=10
+H=10
+[DisabledImage]
+Meter=Image
+W=10
+H=10
 [Image]
 Meter=Image
 W=10
@@ -61,7 +95,12 @@ function Record(label,expected)
 end
 function Update()
     tick=tick+1
-    if tick==70 then Record('DormantBeforeFinishAction','')
+    if tick==70 then
+        Record('DormantBeforeFinishAction','')
+        local image=SKIN:GetMeter('DisabledImage'):GetOption('ImageName','')
+        local source=SKIN:GetMeasure('DisabledLiteral'):GetStringValue()
+        local f=io.open(SKIN:GetVariable('@') .. 'results.txt','a')
+        f:write((image=='' and source=='' and SKIN:GetMeter('PausedImage'):GetOption('ImageName','')=='' and SKIN:GetMeasure('PausedLiteral'):GetStringValue()=='' and 'PASS' or 'FAIL') .. '|DisabledAndPausedLiteralsDoNotPrefetch\n');f:close()
     elseif tick==220 then Record('FirstFinishActionWithoutDynamicVariables','first.webp')
     elseif tick==400 then Record('SecondFinishActionWithoutDynamicVariables','second.webp')
     elseif tick==450 then SKIN:Bang('!Quit') end
@@ -77,11 +116,11 @@ try {
     $taskResults = @(Get-Content (Join-Path $taskResources 'results.txt'))
     $taskErrors = @(Get-Content (Join-Path $taskRoot 'Rainmeter.log') | Where-Object { $_ -match '^ERRO' })
     $taskResults | Write-Output
-    if ($taskResults.Count -ne 3 -or @($taskResults | Where-Object { $_ -notmatch '^PASS\|' }).Count -or $taskErrors.Count) {
+    if ($taskResults.Count -ne 4 -or @($taskResults | Where-Object { $_ -notmatch '^PASS\|' }).Count -or $taskErrors.Count) {
         $taskErrors | Select-Object -First 5 | Write-Output
         throw 'Native WebParser Start checks failed'
     }
-    [PSCustomObject]@{ Version=(Get-Item -LiteralPath $Plugin).VersionInfo.FileVersion; DynamicVariables=$false; ChildUpdates=0; FinishAction='Start only'; Passed=$true; Errors=0 } | ConvertTo-Json | Set-Content (Join-Path $PSScriptRoot 'webparser-start-results.json')
+    [PSCustomObject]@{ Version=(Get-Item -LiteralPath $Plugin).VersionInfo.FileVersion; DynamicVariables=$false; ChildUpdates=0; FinishAction='EnableMeasure / UnpauseMeasure then Start'; Passed=$true; Errors=0 } | ConvertTo-Json | Set-Content (Join-Path $PSScriptRoot 'webparser-start-results.json')
 } finally {
     if (-not $taskProcess.HasExited) { Stop-Process -Id $taskProcess.Id }
 }

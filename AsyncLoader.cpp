@@ -52,12 +52,13 @@ void CALLBACK AsyncLoader::Callback(PTP_CALLBACK_INSTANCE instance, void* raw, P
     CloseThreadpoolWork(work); // Released after this callback returns.
 }
 
-UINT_PTR AsyncLoader::Request(std::wstring path, std::unique_ptr<Animation> retired)
+UINT_PTR AsyncLoader::Request(std::wstring path, std::unique_ptr<Animation> retired, bool firstOnly)
 {
     std::lock_guard<std::mutex> lock(mutex);
     const auto id = ++revision; // Cancels extraction of an older source.
     if (retired) garbage.push_back(std::move(retired));
     if (result) garbage.push_back(std::move(result));
+    firstFrameOnly = firstOnly;
     source = std::move(path);
     error.clear();
     ready = 0;
@@ -123,7 +124,7 @@ void AsyncLoader::Run()
         std::vector<RetiredFile> retiredFiles;
         std::wstring path;
         UINT_PTR id;
-        bool stop;
+        bool stop, firstOnly;
         {
             std::unique_lock<std::mutex> lock(mutex);
             condition.wait(lock, [&] { return closing || requested || !garbage.empty() || !garbageFiles.empty(); });
@@ -131,6 +132,7 @@ void AsyncLoader::Run()
             retiredFiles.swap(garbageFiles);
             stop = closing;
             id = revision;
+            firstOnly = firstFrameOnly;
             if (requested && !stop) path = source;
             requested = false;
         }
@@ -145,6 +147,7 @@ void AsyncLoader::Run()
         {
             loaded = std::make_unique<Animation>();
             ExtractAnimation(path, resources, *loaded, cancelled, [&](const Animation& animation) {
+                if (firstOnly) return;
                 if (!SafeArgument(animation.preview)) throw std::runtime_error("Temporary path contains unsupported bang delimiters");
                 std::lock_guard<std::mutex> lock(mutex);
                 if (cancelled()) return;
@@ -152,7 +155,7 @@ void AsyncLoader::Run()
                 originalPreview = animation.frames.front();
                 previewDelay = animation.delays.front();
                 PostMessageW(window, message, id, 1);
-            });
+            }, firstOnly);
             for (const auto& frame : loaded->frames)
                 if (!SafeArgument(frame)) throw std::runtime_error("Temporary path contains unsupported bang delimiters");
         }

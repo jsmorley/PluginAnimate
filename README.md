@@ -4,10 +4,30 @@ Native C++ Rainmeter plugin for animated GIF, APNG, and WebP files. Frames are d
 once into 32-bit BMP V5 files with alpha; a normal `Meter=Image` displays them. No external codec, command
 line program, or C++ runtime installation is required.
 
-Version **2.0.0** reads all options when the measure is created. If `ImageName`
-resolves to an existing animation, extraction begins on the background worker.
-After all frames are ready, the target Image meter displays only the first
-real frame and waits. `Start` begins playback from that frame.
+Version **2.1.0** checks the measure's `Disabled` and `Paused` flags before reading any
+animation options. With `Disabled=1` or `Paused=1`, creation does not resolve `ImageName`,
+create workers, extract frames, log source errors, or send a first frame.
+Commands received while disabled or paused do not initialize playback. Clear the
+corresponding host flag first:
+
+```ini
+FinishAction=[!EnableMeasure MeasureAnimate][!UnpauseMeasure MeasureAnimate][!CommandMeasure MeasureAnimate "Start"]
+```
+
+The SDK requires reading the `Disabled` and `Paused` control flags themselves; all animation
+options remain unread until enabled. Enable followed immediately by Start
+works without `DynamicVariables=1` or an intervening update. Disabling or host-pausing active
+playback stops further frame output when its next display/load callback runs;
+a later enabled, unpaused Start begins again at frame 1. These host flags are
+separate from Animate's `Pause` and `PauseResume` commands, which still retain
+the current playback position.
+
+An enabled measure reads all animation options when it is created. If `ImageName`
+resolves to an existing animation, only its first composited frame is extracted on the background worker and
+displayed on the target Image meter. No remaining frames are decoded or written
+until `Start`. Start extracts the complete animation in the background, keeping
+the initial frame visible, and then begins playback. `DisplayLoading=1` can
+show the annotated loading preview during this full extraction.
 
 If a missing filename contains section-variable syntax such as `[MeasureIcon]`,
 Animate instead waits silently for `Start`: no extraction, runtime workers,
@@ -15,10 +35,11 @@ Image meter commands, or repeated option reads. This supports WebParser values
 that do not exist yet. A resolved filename of only `.webp`, `.apng`, or `.gif`
 (case insensitive, including within a folder path) also waits silently. This
 covers empty icon names supplied through `#VariableName#` as well as section
-variables, and literal extension-only placeholders. An existing file that is corrupt or unsupported is an
-error, even when its name contains a section variable. Missing literal paths
+variables, and literal extension-only placeholders. An existing file that cannot supply a valid first frame reports an
+error, even when its name contains a section variable. Corruption in later
+frames is reported when Start performs the full extraction. Missing literal paths
 and empty literal filenames also report an error during creation and stop trying.
-Every explicit `Start` reads the current options and resolves section variables
+Every explicit `Start` while enabled and unpaused reads the current options and resolves section variables
 again, even without `DynamicVariables=1`. It retries a failed file once, so a
 repaired file at the same path can recover. Skin updates never retry an
 unchanged failed source.
@@ -120,7 +141,7 @@ A changed `ImageName` loads the new source normally and logs a failed load once.
 The Image meter is cleared when changing sources or when extraction fails, so
 it does not keep trying to display deleted temporary frames.
 
-For weather skins, put `FinishAction=[!CommandMeasure MeasureAnimate "Start"]`
+For weather skins with an enabled Animate measure, put `FinishAction=[!CommandMeasure MeasureAnimate "Start"]`
 on the WebParser parent. That single command reads the newly parsed icon code;
 no child WebParser updates, initially disabled Animate measure, or
 `DynamicVariables=1` are required. Do not issue an earlier refresh-time `Start`
@@ -325,6 +346,16 @@ through `third_party/WebP.props`; no additional dependency setup is required.
 Its provenance and license notices are in [third_party](third_party/README.md).
 Binary distributions must retain the libwebp notices provided in
 `Releases/WEBP-NOTICES.txt`.
+
+Version 2.1.0 validation on November 10, 2026: both x64 and Win32
+regression suites passed, including disabled and paused creation with zero animation-option
+reads, no workers or image output, immediate Enable/Start, and disabling/host-pausing active
+playback. Native Rainmeter tests verified disabled and paused valid and missing literal
+paths stay silent, and two real WebParser FinishActions enable, unpause, and start without
+DynamicVariables or extra child updates. First-frame-only GIF/APNG/WebP extraction (including APNG poster exclusion),
+creation/prefetch and missing-source log regressions also passed. The 235-frame large GIF displayed its initial frame in 47 ms. After Start,
+full extraction took 3.81 seconds and its loading preview arrived in 92 ms
+while the UI continued processing messages. These are local test timings.
 
 The 2.0.0 startup regressions verify creation-time option reads, full extraction
 and a still first frame before Start, deferred section-variable inputs,

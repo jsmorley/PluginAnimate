@@ -1,8 +1,8 @@
 {
-  "Version": "2.0.0",
+  "Version": "2.1.0",
   "DynamicVariables": false,
   "ChildUpdates": 0,
-  "FinishAction": "Start only",
+  "FinishAction": "EnableMeasure / UnpauseMeasure then Start",
   "Passed": true,
   "Errors": 0
 }

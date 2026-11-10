@@ -26,7 +26,7 @@ void* RmGetSkin(void* rm) { return rm; }
 double RmReadDouble(void* rm, LPCWSTR name, double value) { return RmReadFormula(rm, name, value); }
 LPCWSTR __stdcall RmReadString(void*, LPCWSTR key, LPCWSTR fallback, BOOL replaceMeasures)
 {
-    ++optionReads;
+    if (std::wstring(key) != L"Disabled" && std::wstring(key) != L"Paused") ++optionReads;
     auto found = options.find(key);
     if (found == options.end()) return fallback;
     if (!replaceMeasures) return found->second.c_str();
@@ -45,7 +45,7 @@ LPCWSTR __stdcall RmReadString(void*, LPCWSTR key, LPCWSTR fallback, BOOL replac
 }
 double __stdcall RmReadFormula(void*, LPCWSTR key, double fallback)
 {
-    ++optionReads;
+    if (std::wstring(key) != L"Disabled" && std::wstring(key) != L"Paused") ++optionReads;
     auto found = options.find(key);
     return found == options.end() ? fallback : std::stod(found->second);
 }
@@ -407,6 +407,44 @@ int wmain(int argc, wchar_t** argv)
             Assert(cancelled && !std::filesystem::exists(cancelledDir), "Cancelled extraction removes partial frame output");
         }
 
+        for (const auto* name : {L"disposal.gif", L"blend.apng", L"poster.png", L"blend.webp"})
+        {
+            Animation first, full;
+            ExtractAnimation(fixture(name), testResources, first, {}, {}, true);
+            ExtractTestAnimation(fixture(name), full);
+            Assert(first.firstFrameOnly && first.frames.size() == 1 && first.delays.size() == 1 && first.preview.empty() &&
+                ReadPixels(first.frames.front()) == ReadPixels(full.frames.front()) && first.delays.front() == full.delays.front(),
+                "Frame-only extraction preserves GIF/APNG/WebP composition and metadata without later frames or loading preview");
+        }
+        for (const auto* hostFlag : {L"Disabled", L"Paused"})
+        {
+            options = {{hostFlag,L"1"},{L"ImageName",fixture(L"blend.webp")},{L"MeterName",L"DisabledImage"},{L"Loop",L"-1"}};
+            const auto reads = optionReads, displays = commands.size(), logs = errors.size();
+            void* disabled = nullptr;
+            Initialize(&disabled, &options);
+            auto* idle = static_cast<Measure*>(disabled);
+            for (int i = 0; i < 20; ++i) { double maximum = -1; Reload(disabled, &options, &maximum); Update(disabled); }
+            ExecuteBang(disabled, L"Start");
+            Assert(optionReads == reads && !idle->configured && !idle->window && !idle->loader &&
+                !idle->worker.joinable() && commands.size() == displays && errors.size() == logs,
+                "Disabled creation and Start read no animation options and create no runtime or output");
+            options[hostFlag] = L"0";
+            ExecuteBang(disabled, L"Start");
+            Until([&] { return !idle->loading; }, "Enable then Start initializes immediately");
+            Assert(idle->animation && idle->playing && commands.size() > displays,
+                "Enable then Start plays without an intervening Reload or Update");
+            options[hostFlag] = L"1";
+            const auto beforeDisable = commands.size();
+            Pump(150);
+            Assert(!idle->playing && commands.size() == beforeDisable,
+                "Disabling active playback suppresses subsequent frame commands");
+            options[hostFlag] = L"0";
+            ExecuteBang(disabled, L"Start");
+            Assert(idle->playing && idle->index == 0, "Enabled playback restarts at frame zero");
+            auto cleanup = std::weak_ptr<AsyncLoader>(idle->loader);
+            Finalize(disabled);
+            Until([&] { return cleanup.expired(); }, "Disabled test cleans up");
+        }
         {
             options = {{L"ImageName",fixture(L"blend.webp")},{L"MeterName",L"PrefetchImage"},{L"Speed",L"75"},{L"Loop",L"-1"},{L"DisplayLoading",L"1"}};
             void* prefetch = nullptr;
@@ -416,14 +454,17 @@ int wmain(int argc, wchar_t** argv)
             Assert(optionReads > reads && idle->loading && !idle->started && idle->meter == L"PrefetchImage" &&
                 idle->speed == 75 && idle->loop == -1 && idle->displayLoading, "Creation reads all options and starts asynchronous prefetch");
             Until([&] { return !idle->loading; }, "Creation-time prefetch finishes");
-            Assert(idle->animation && idle->index == 0 && !idle->playing && commands.size() == displays + 1 &&
+            Assert(idle->animation && idle->animation->firstFrameOnly && idle->animation->frames.size() == 1 && idle->index == 0 && !idle->playing && commands.size() == displays + 1 &&
                 commands.back().find(L"frame-0.bmp") != std::wstring::npos,
                 "Completed prefetch displays only the real first frame, even with DisplayLoading enabled");
             Pump(120);
             Assert(idle->index == 0 && commands.size() == displays + 1 && Update(prefetch) == 75,
                 "Prefetched frame remains still until Start");
             ExecuteBang(prefetch, L"start");
-            Assert(idle->playing && idle->index == 0 && !idle->loading, "Start plays already-extracted frames without reloading");
+            Assert(idle->loading && !idle->playing, "Start promotes first-frame prefetch to full extraction");
+            Until([&] { return !idle->loading; }, "Start completes full extraction");
+            Assert(idle->playing && idle->animation->frames.size() == 4 && !idle->animation->firstFrameOnly,
+                "Full extraction starts playback after first-frame-only prefetch");
             std::weak_ptr<AsyncLoader> prefetchCleanup = idle->loader;
             Finalize(prefetch);
             Until([&] { return prefetchCleanup.expired(); }, "Prefetch cleanup completes");
@@ -521,8 +562,12 @@ int wmain(int argc, wchar_t** argv)
             Initialize(&corrupt, &options);
             auto* idle = static_cast<Measure*>(corrupt);
             Until([&] { return !idle->loading; }, "Existing corrupt variable input fails prefetch");
+            Assert(errors.empty() && idle->animation && idle->animation->frames.size() == 1,
+                "A damaged later frame is not decoded during first-frame prefetch");
+            ExecuteBang(corrupt, L"Start");
+            Until([&] { return !idle->loading; }, "Start validates the remaining animation");
             Assert(errors.size() == 1 && !idle->animation && !idle->displayed && !idle->deferred,
-                "A section variable does not suppress corrupt-file errors when its file exists");
+                "Start reports corruption in later animation data once");
             for (int i = 0; i < 20; ++i) { double maximum = 0; Reload(corrupt, &options, &maximum); Update(corrupt); Pump(1); }
             Assert(errors.size() == 1, "Corrupt prefetch failure logs once and does not retry on updates");
             std::weak_ptr<AsyncLoader> corruptCleanup = idle->loader;
@@ -774,8 +819,13 @@ int wmain(int argc, wchar_t** argv)
         if (argc == 3 && std::wstring(argv[1]) == L"--large")
         {
             options = {{L"ImageName",argv[2]},{L"MeterName",L"LargeImage"},{L"Loop",L"-1"},{L"DisplayLoading",L"1"}};
+            const auto firstBegan = GetTickCount64();
             Initialize(&data, &options);
             m = static_cast<Measure*>(data);
+            Until([&] { return !m->loading; }, "Large GIF first-frame prefetch finishes", 30000);
+            Assert(m->animation && m->animation->frames.size() == 1 && m->animation->firstFrameOnly && !m->playing,
+                "Large GIF creation extracts only one frame and does not start playback");
+            std::cout << "Large GIF initial frame only: " << GetTickCount64() - firstBegan << " ms\n";
             const auto began = GetTickCount64();
             const auto beganPrecise = std::chrono::steady_clock::now();
             Reload(data, &options, &maximum);

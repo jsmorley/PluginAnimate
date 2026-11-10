@@ -7,7 +7,7 @@ $taskPlugins = Join-Path $taskRoot 'Plugins'
 New-Item -ItemType Directory -Force -Path $taskResources,$taskPlugins | Out-Null
 Copy-Item -LiteralPath $Plugin -Destination (Join-Path $taskPlugins 'Animate.dll')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'fixtures\blend.webp') -Destination (Join-Path $taskResources 'valid.webp')
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'fixtures\bad.apng') -Destination (Join-Path $taskResources 'corrupt.apng')
+Set-Content -LiteralPath (Join-Path $taskResources 'corrupt.apng') -Value 'invalid animation header' -Encoding ascii
 $taskText = @'
 [Rainmeter]
 Update=10
@@ -117,7 +117,7 @@ function Update()
         first=image
         local last=image:gsub('frame%-0%.bmp$','frame-3.bmp')
         local f=last~='' and io.open(last,'rb')
-        Record('AllFramesLoadedAndOnlyFrame1Displayed',image:match('frame%-0%.bmp$')~=nil and f~=nil)
+        Record('OnlyFirstFrameExtractedAndDisplayed',image:match('frame%-0%.bmp$')~=nil and f==nil)
         if f then f:close() end
         Record('CreationErrorsDoNotSendImages',SKIN:GetMeter('MissingImage'):GetOption('ImageName','')=='' and SKIN:GetMeter('CorruptImage'):GetOption('ImageName','')=='' and SKIN:GetMeter('DirectoryImage'):GetOption('ImageName','')=='' and SKIN:GetMeter('EmptyImage'):GetOption('ImageName','')=='')
         Record('ExtensionOnlyInputsRemainSilent',SKIN:GetMeter('ExtensionWebpImage'):GetOption('ImageName','')=='' and SKIN:GetMeter('ExtensionApngImage'):GetOption('ImageName','')=='' and SKIN:GetMeter('ExtensionGifImage'):GetOption('ImageName','')=='')
@@ -142,7 +142,7 @@ try {
         $taskErrors | Select-Object -First 8 | Write-Output
         throw 'Native creation checks failed'
     }
-    [PSCustomObject]@{Version=(Get-Item -LiteralPath $Plugin).VersionInfo.FileVersion; PrefetchBeforeStart=$true; FirstFrameOnly=$true;
+    [PSCustomObject]@{Version=(Get-Item -LiteralPath $Plugin).VersionInfo.FileVersion; PrefetchBeforeStart=$true; OnlyFirstFrameExtracted=$true; FirstFrameOnly=$true;
         StartsOnlyOnCommand=$true; InvalidCreationErrors=$taskErrors.Count; ImageMeterErrors=0; Passed=$true} |
         ConvertTo-Json | Set-Content (Join-Path $PSScriptRoot 'creation-results.json')
 } finally {

@@ -283,7 +283,7 @@ UINT Metadata(IWICMetadataQueryReader* reader, const wchar_t* name, UINT fallbac
     return result;
 }
 void Gif(IWICImagingFactory* factory, const std::wstring& path, Animation& output, const std::function<bool()>& cancelled,
-    const std::function<void(const Animation&)>& firstFrame)
+    const std::function<void(const Animation&)>& firstFrame, bool firstFrameOnly)
 {
     ComPtr<IWICBitmapDecoder> decoder;
     Check(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder));
@@ -331,7 +331,8 @@ void Gif(IWICImagingFactory* factory, const std::wstring& path, Animation& outpu
         Save(factory, output, canvas, w, h, cancelled);
         // GIF delays are hundredths of a second. Missing metadata defaults to 100 ms.
         output.delays.push_back((std::max)(UINT(USER_TIMER_MINIMUM), Metadata(metadata.Get(), L"/grctlext/Delay", 10) * 10));
-        if (output.frames.size() == 1 && firstFrame)
+        if (firstFrameOnly) return;
+        if (!firstFrameOnly && output.frames.size() == 1 && firstFrame)
         {
             MakePreview(factory, output, canvas, w, h, cancelled);
             firstFrame(output);
@@ -341,7 +342,7 @@ void Gif(IWICImagingFactory* factory, const std::wstring& path, Animation& outpu
     }
 }
 void Webp(IWICImagingFactory* factory, const Bytes& file, Animation& output, const std::function<bool()>& cancelled,
-    const std::function<void(const Animation&)>& firstFrame)
+    const std::function<void(const Animation&)>& firstFrame, bool firstFrameOnly)
 {
     const WebPData data{file.data(), file.size()};
     // Inspect dimensions/counts before AnimDecoder allocates its compositing canvases.
@@ -396,6 +397,7 @@ void Webp(IWICImagingFactory* factory, const Bytes& file, Animation& output, con
         Save(factory, output, canvas, w, h, cancelled);
         output.delays.push_back((std::max)(UINT(USER_TIMER_MINIMUM), UINT(timestamp - previous)));
         previous = timestamp;
+        if (firstFrameOnly) return;
         if (!i && firstFrame)
         {
             MakePreview(factory, output, canvas, w, h, cancelled);
@@ -404,7 +406,7 @@ void Webp(IWICImagingFactory* factory, const Bytes& file, Animation& output, con
     }
 }
 void Apng(IWICImagingFactory* factory, const Bytes& file, Animation& output, const std::function<bool()>& cancelled,
-    const std::function<void(const Animation&)>& firstFrame)
+    const std::function<void(const Animation&)>& firstFrame, bool firstFrameOnly)
 {
     Bytes header, shared, compressed, canvas;
     UINT w = 0, h = 0, expected = 0;
@@ -437,7 +439,7 @@ void Apng(IWICImagingFactory* factory, const Bytes& file, Animation& output, con
         Composite(canvas, w, pixels, r);
         Save(factory, output, canvas, w, h, cancelled);
         output.delays.push_back(delay);
-        if (output.frames.size() == 1 && firstFrame)
+        if (!firstFrameOnly && output.frames.size() == 1 && firstFrame)
         {
             MakePreview(factory, output, canvas, w, h, cancelled);
             firstFrame(output);
@@ -471,7 +473,7 @@ void Apng(IWICImagingFactory* factory, const Bytes& file, Animation& output, con
         else if (is("fcTL"))
         {
             Require(actl && n == 26 && Read32(p) == sequence++, "Invalid APNG frame control or sequence");
-            if (controlled) finish();
+            if (controlled) { finish(); if (firstFrameOnly) return; }
             r = { Read32(p + 4), Read32(p + 8), Read32(p + 12), Read32(p + 16), p[24], p[25] };
             const UINT numerator = (UINT(p[20]) << 8) | p[21];
             UINT denominator = (UINT(p[22]) << 8) | p[23];
@@ -498,7 +500,8 @@ void Apng(IWICImagingFactory* factory, const Bytes& file, Animation& output, con
         else if (is("IEND"))
         {
             Require(n == 0 && idat && controlled, "Incomplete APNG");
-            finish(); ended = true;
+            finish(); if (firstFrameOnly) return;
+            ended = true;
             Require(pos + 12 == file.size(), "Data after PNG end");
             break;
         }
@@ -609,9 +612,10 @@ void CleanupOrphanAnimations(const std::wstring& resources)
 }
 
 void ExtractAnimation(const std::wstring& path, const std::wstring& resources, Animation& output, const std::function<bool()>& cancelled,
-    const std::function<void(const Animation&)>& firstFrame)
+    const std::function<void(const Animation&)>& firstFrame, bool firstFrameOnly)
 {
     Cancel(cancelled);
+    output.firstFrameOnly = firstFrameOnly;
     CleanupOrphanAnimations(resources);
     Require(output.directory.empty() && output.temporaryRoot.empty() && output.frames.empty(), "Extraction destination is already in use");
     ComScope com;
@@ -658,18 +662,18 @@ void ExtractAnimation(const std::wstring& path, const std::wstring& resources, A
             written == sizeof(OwnerSignature) - 1 && FlushFileBuffers(output.ownerFile),
             "Cannot write frame ownership marker");
     }
-    if (gif) Gif(factory.Get(), path, output, cancelled, firstFrame);
+    if (gif) Gif(factory.Get(), path, output, cancelled, firstFrame, firstFrameOnly);
     else if (bytes.size() >= 12 && std::memcmp(bytes.data(), "RIFF", 4) == 0 && std::memcmp(bytes.data() + 8, "WEBP", 4) == 0)
     {
         const uint32_t riffSize = uint32_t(bytes[4]) | uint32_t(bytes[5]) << 8 | uint32_t(bytes[6]) << 16 | uint32_t(bytes[7]) << 24;
         Require(uint64_t(riffSize) + 8 == bytes.size(), "Invalid WebP RIFF length");
-        Webp(factory.Get(), bytes, output, cancelled, firstFrame);
+        Webp(factory.Get(), bytes, output, cancelled, firstFrame, firstFrameOnly);
     }
     else
     {
         const BYTE signature[] = {137, 80, 78, 71, 13, 10, 26, 10};
         Require(std::memcmp(bytes.data(), signature, 8) == 0, "Input must be GIF, animated PNG, or animated WebP");
-        Apng(factory.Get(), bytes, output, cancelled, firstFrame);
+        Apng(factory.Get(), bytes, output, cancelled, firstFrame, firstFrameOnly);
     }
     Cancel(cancelled);
 }

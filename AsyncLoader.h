@@ -11,7 +11,7 @@ class AsyncLoader
 {
 public:
     static std::shared_ptr<AsyncLoader> Create(HWND window, UINT message, std::wstring resources);
-    UINT_PTR Request(std::wstring source, std::unique_ptr<Animation> retired);
+    UINT_PTR Request(std::wstring source, std::unique_ptr<Animation> retired, bool firstFrameOnly = false);
     bool Take(UINT_PTR revision, std::unique_ptr<Animation>& result, std::wstring& error);
     bool Preview(UINT_PTR revision, std::wstring& path, std::wstring& original, UINT& delay);
     void DiscardPreview(std::wstring path, AnimationFileLock protection);
@@ -29,6 +29,7 @@ private:
     HWND window = nullptr;
     UINT message = 0;
     bool requested = false;
+    bool firstFrameOnly = false;
     UINT_PTR ready = 0;
     std::wstring source, error;
     std::wstring resources;
